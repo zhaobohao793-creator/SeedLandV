@@ -64,21 +64,31 @@ def _update_status(
     session.flush()
 
 
-def _publish_snapshot(task: Task) -> None:
-    publish_task_update(
-        task.tenant_id,
-        {
-            "server_id": str(task.uuid),
-            "local_id": task.local_id,
-            "id": task.ark_task_id,
-            "status": task.status.value,
-            "videoUrl": task.tos_video_url or task.ark_video_url,
-            "lastFrameUrl": task.ark_last_frame,
-            "usage": task.usage,
-            "error": task.error,
-            "updatedAt": int(task.updated_at.timestamp() * 1000) if task.updated_at else None,
-        },
-    )
+def _publish_snapshot(session: Session, task: Task) -> None:
+    """Emit full TaskOut-shaped snapshot — renderer's `task:update` consumes this verbatim."""
+    assets = session.scalars(
+        select(TaskAsset).where(TaskAsset.task_id == task.id).order_by(TaskAsset.position)
+    ).all()
+    payload = {
+        "server_id": str(task.uuid),
+        "id": task.ark_task_id,
+        "localId": task.local_id,
+        "mode": task.mode,
+        "prompt": task.prompt,
+        "params": task.params,
+        "assetsPreview": [
+            {"kind": a.kind, "label": a.origin_url or (a.tos_key or "uploaded")}
+            for a in assets
+        ],
+        "status": task.status.value,
+        "videoUrl": task.tos_video_url or task.ark_video_url,
+        "lastFrameUrl": task.ark_last_frame,
+        "usage": task.usage,
+        "error": task.error,
+        "createdAt": int(task.created_at.timestamp() * 1000) if task.created_at else 0,
+        "updatedAt": int(task.updated_at.timestamp() * 1000) if task.updated_at else 0,
+    }
+    publish_task_update(task.tenant_id, payload)
 
 
 def _ark_client_for(session: Session, tenant_id) -> ArkClient:
@@ -126,16 +136,15 @@ def ark_submit_and_poll(self, task_id: int) -> str:  # noqa: ANN001
                 extra={"error": {"message": str(e), "phase": "build"}},
             )
             session.commit()
-            _publish_snapshot(task)
+            _publish_snapshot(session, task)
             raise
 
         _update_status(session, task, TaskStatus.SUBMITTING)
         session.commit()
-        _publish_snapshot(task)
-
-        client = _ark_client_for(session, task.tenant_id)
+        _publish_snapshot(session, task)
 
         try:
+            client = _ark_client_for(session, task.tenant_id)
             sub = client.submit(payload)
         except ArkError as e:
             _update_status(
@@ -147,13 +156,26 @@ def ark_submit_and_poll(self, task_id: int) -> str:  # noqa: ANN001
                 extra={"error": {"message": str(e), "code": e.code, "raw": e.raw}},
             )
             session.commit()
-            _publish_snapshot(task)
+            _publish_snapshot(session, task)
+            return TaskStatus.FAILED.value
+        except Exception as e:
+            # Covers missing Ark Key, network, etc. — anything that prevents submit.
+            _update_status(
+                session,
+                task,
+                TaskStatus.FAILED,
+                event_kind="error",
+                event_payload={"phase": "submit", "message": str(e)},
+                extra={"error": {"message": str(e), "phase": "submit"}},
+            )
+            session.commit()
+            _publish_snapshot(session, task)
             return TaskStatus.FAILED.value
 
         task.ark_task_id = sub.id
         _update_status(session, task, TaskStatus.QUEUED)
         session.commit()
-        _publish_snapshot(task)
+        _publish_snapshot(session, task)
 
         def on_update(snap: ArkTaskResponse) -> None:
             # Refresh task in this same session — long-running poll, so re-bind on each tick.
@@ -178,7 +200,7 @@ def ark_submit_and_poll(self, task_id: int) -> str:  # noqa: ANN001
                 extra=extra,
             )
             session.commit()
-            _publish_snapshot(t)
+            _publish_snapshot(session, t)
 
         try:
             final = poll_until_done(client, sub.id, on_update=on_update)
@@ -192,7 +214,7 @@ def ark_submit_and_poll(self, task_id: int) -> str:  # noqa: ANN001
                 extra={"error": {"message": "轮询超时", "raw": str(e)}},
             )
             session.commit()
-            _publish_snapshot(task)
+            _publish_snapshot(session, task)
             return TaskStatus.FAILED.value
         except PollCancelled:
             return TaskStatus.CANCELLED.value
@@ -206,7 +228,7 @@ def ark_submit_and_poll(self, task_id: int) -> str:  # noqa: ANN001
                 extra={"error": {"message": str(e), "code": e.code, "raw": e.raw}},
             )
             session.commit()
-            _publish_snapshot(task)
+            _publish_snapshot(session, task)
             return TaskStatus.FAILED.value
 
         # Terminal handling (final state already written by on_update).
