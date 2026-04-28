@@ -42,9 +42,9 @@ export default function TaskCard({
 
   const removeFromStore = useAppStore((s) => s.removeTask)
 
-  const onCancel = () => window.seedland.cancelTask(task.localId)
+  const onCancel = () => task.serverId && window.seedland.cancelTask(task.serverId)
   const onRemove = async () => {
-    await window.seedland.removeTask(task.localId)
+    if (task.serverId) await window.seedland.removeTask(task.serverId)
     removeFromStore(task.localId)
   }
   const onDownload = async () => {

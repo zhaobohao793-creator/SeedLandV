@@ -15,6 +15,7 @@ export default function Topbar() {
   const apiStatus = useAppStore((s) => s.apiStatus)
   const currentModel = useAppStore((s) => s.forms['text-to-video'].params.model)
   const setModel = useAppStore((s) => s.setModel)
+  const setArkKeyPromptOpen = useAppStore((s) => s.setArkKeyPromptOpen)
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
 
@@ -134,7 +135,12 @@ export default function Topbar() {
       </div>
 
       <div className="flex items-center gap-3">
-        <div className="flex items-center gap-2 rounded-full border border-[rgba(138,148,184,0.12)] px-3 py-1.5">
+        <button
+          type="button"
+          onClick={() => setArkKeyPromptOpen(true)}
+          title={activeReady ? '点击重设 Ark Key' : '点击配置 Ark Key'}
+          className="flex items-center gap-2 rounded-full border border-[rgba(138,148,184,0.12)] px-3 py-1.5 transition-colors hover:border-[rgba(0,229,255,0.3)] hover:bg-[rgba(0,229,255,0.04)]"
+        >
           <motion.span
             animate={{ opacity: activeReady ? [0.4, 1, 0.4] : 1 }}
             transition={{ repeat: Infinity, duration: 2 }}
@@ -146,7 +152,7 @@ export default function Topbar() {
           <span className="text-[11px] font-medium tracking-wider uppercase text-text-muted">
             {activeReady ? 'ARK Key Ready' : 'Missing ARK Key'}
           </span>
-        </div>
+        </button>
       </div>
     </header>
   )

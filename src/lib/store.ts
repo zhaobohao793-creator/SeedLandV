@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import type {
   ApiStatus,
   AssetSource,
+  AuthState,
   GenerationMode,
   GenerationParams,
   ModelId,
@@ -28,11 +29,15 @@ interface FormState {
 }
 
 interface AppState {
+  authState: AuthState
   apiStatus: ApiStatus | null
+  arkKeyPromptOpen: boolean
   currentMode: GenerationMode
   tasks: TaskRecord[]
   forms: Record<GenerationMode, FormState>
+  setAuthState: (s: AuthState) => void
   setApiStatus: (s: ApiStatus) => void
+  setArkKeyPromptOpen: (open: boolean) => void
   setMode: (m: GenerationMode) => void
   setPrompt: (mode: GenerationMode, v: string) => void
   setAssets: (mode: GenerationMode, a: AssetSource[]) => void
@@ -56,7 +61,9 @@ const emptyForm = (): FormState => ({
 })
 
 export const useAppStore = create<AppState>((set) => ({
+  authState: { loggedIn: false },
   apiStatus: null,
+  arkKeyPromptOpen: false,
   currentMode: 'text-to-video',
   tasks: [],
   forms: {
@@ -65,7 +72,9 @@ export const useAppStore = create<AppState>((set) => ({
     'first-last-frame': emptyForm(),
     'multi-reference': emptyForm()
   },
+  setAuthState: (s) => set({ authState: s }),
   setApiStatus: (s) => set({ apiStatus: s }),
+  setArkKeyPromptOpen: (open) => set({ arkKeyPromptOpen: open }),
   setMode: (m) => set({ currentMode: m }),
   setPrompt: (mode, v) =>
     set((st) => ({
