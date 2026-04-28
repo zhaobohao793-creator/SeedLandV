@@ -3,14 +3,12 @@ import path from 'node:path'
 import fs from 'node:fs'
 import dotenv from 'dotenv'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
-import type { ApiStatus, SubmitTaskInput, TaskRecord } from '@shared/types'
-import { arkSubmit, ArkError } from './ark/client'
-import { buildPayload } from './ark/tasks'
-import { pollUntilDone } from './ark/poller'
-import { fileStats } from './ark/encode'
-import { translateArkError } from './ark/errors'
+import type { ApiStatus, AssetKind, SubmitTaskInput } from '@shared/types'
+import { Http } from './api/http'
+import { Auth, type AuthState } from './api/auth'
+import { ApiClient } from './api/client'
+import { TaskSocket } from './api/socket'
 
-// Load .env from project root (dev) or resources (packaged)
 function loadEnv() {
   const candidates = is.dev
     ? [path.join(process.cwd(), '.env'), path.join(app.getAppPath(), '.env')]
@@ -27,8 +25,10 @@ function loadEnv() {
 }
 
 let mainWindow: BrowserWindow | null = null
-const tasks = new Map<string, TaskRecord>()
-const controllers = new Map<string, AbortController>()
+let http: Http
+let auth: Auth
+let api: ApiClient
+let socket: TaskSocket
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -68,8 +68,20 @@ app.whenReady().then(() => {
   loadEnv()
   electronApp.setAppUserModelId('com.seedland.seedlandv')
   app.on('browser-window-created', (_, w) => optimizer.watchWindowShortcuts(w))
+
+  const baseUrl = process.env.SEEDLANDV_API_URL || 'http://localhost:8000'
+  http = new Http(baseUrl, () => auth.getToken())
+  auth = new Auth(http)
+  api = new ApiClient(http, auth)
+  socket = new TaskSocket(baseUrl, auth, (task) => {
+    mainWindow?.webContents.send('task:update', task)
+  })
+
+  auth.bootstrap()
   registerIpc()
   createWindow()
+
+  socket.start()
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
@@ -80,46 +92,118 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 
-function broadcastTask(task: TaskRecord) {
-  mainWindow?.webContents.send('task:update', task)
-}
+app.on('before-quit', () => {
+  socket?.stop()
+})
 
-function updateTask(localId: string, patch: Partial<TaskRecord>) {
-  const prev = tasks.get(localId)
-  if (!prev) return
-  const next = { ...prev, ...patch, updatedAt: Date.now() }
-  tasks.set(localId, next)
-  broadcastTask(next)
+function fileSize(p: string): number {
+  try {
+    return fs.statSync(p).size
+  } catch {
+    return 0
+  }
 }
 
 function registerIpc() {
-  ipcMain.handle('api:status', (): ApiStatus => ({
-    ark: { hasKey: !!process.env.VOLC_ARK_API_KEY }
-  }))
+  ipcMain.handle('auth:state', (): AuthState => auth.state())
 
-  ipcMain.handle('api:listTasks', () => Array.from(tasks.values()).sort((a, b) => b.createdAt - a.createdAt))
+  ipcMain.handle(
+    'auth:login',
+    async (_e, email: string, password: string): Promise<AuthState | { error: string }> => {
+      try {
+        const st = await auth.login(email, password)
+        socket.rebind()
+        return st
+      } catch (err) {
+        return { error: (err as Error).message }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    'auth:register',
+    async (
+      _e,
+      email: string,
+      password: string,
+      tenantName?: string
+    ): Promise<AuthState | { error: string }> => {
+      try {
+        const st = await auth.register(email, password, tenantName)
+        socket.rebind()
+        return st
+      } catch (err) {
+        return { error: (err as Error).message }
+      }
+    }
+  )
+
+  ipcMain.handle('auth:logout', async () => {
+    await auth.logout()
+    socket.rebind()
+  })
+
+  ipcMain.handle('tenant:setArkKey', async (_e, key: string): Promise<{ ok: true } | { error: string }> => {
+    try {
+      await api.setArkKey(key)
+      return { ok: true }
+    } catch (err) {
+      return { error: (err as Error).message }
+    }
+  })
+
+  ipcMain.handle('tenant:arkKeyStatus', async (): Promise<{ hasKey: boolean }> => {
+    try {
+      return await api.getArkKeyStatus()
+    } catch {
+      return { hasKey: false }
+    }
+  })
+
+  ipcMain.handle('api:status', async (): Promise<ApiStatus> => {
+    try {
+      const { hasKey } = await api.getArkKeyStatus()
+      return { ark: { hasKey } }
+    } catch {
+      return { ark: { hasKey: false } }
+    }
+  })
+
+  ipcMain.handle('api:listTasks', async () => {
+    try {
+      return await api.listTasks()
+    } catch (err) {
+      console.warn('[api:listTasks]', (err as Error).message)
+      return []
+    }
+  })
 
   ipcMain.handle('api:clearTasks', () => {
-    for (const [, c] of controllers) c.abort()
-    controllers.clear()
-    tasks.clear()
+    // UI-only state lives in renderer; nothing to clear server-side without an explicit delete.
   })
 
-  ipcMain.handle('api:cancel', (_e, localId: string) => {
-    controllers.get(localId)?.abort()
-    updateTask(localId, { status: 'cancelled' })
+  ipcMain.handle('api:cancel', async (_e, serverId: string) => {
+    if (!serverId) return
+    try {
+      await api.cancelTask(serverId)
+    } catch (err) {
+      console.warn('[api:cancel]', (err as Error).message)
+    }
   })
 
-  ipcMain.handle('api:removeTask', (_e, localId: string) => {
-    controllers.get(localId)?.abort()
-    controllers.delete(localId)
-    tasks.delete(localId)
+  ipcMain.handle('api:removeTask', async (_e, serverId: string) => {
+    if (!serverId) return
+    try {
+      await api.cancelTask(serverId)
+    } catch (err) {
+      console.warn('[api:removeTask]', (err as Error).message)
+    }
   })
 
   ipcMain.handle(
     'api:pickFile',
-    async (_e, kind: 'image' | 'video' | 'audio', allowedExts?: string[]) => {
-      const defaults: Record<'image' | 'video' | 'audio', { name: string; exts: string[] }> = {
+    async (_e, kind: AssetKind, allowedExts?: string[]) => {
+      const defaults: Record<AssetKind, { name: string; exts: string[] }> = {
         image: { name: 'Images', exts: ['jpg', 'jpeg', 'png', 'webp', 'bmp'] },
         video: { name: 'Videos', exts: ['mp4', 'mov', 'webm', 'mkv'] },
         audio: { name: 'Audio', exts: ['mp3', 'wav', 'm4a', 'aac'] }
@@ -128,14 +212,10 @@ function registerIpc() {
       const filters = [
         { name: d.name, extensions: allowedExts && allowedExts.length ? allowedExts : d.exts }
       ]
-      const res = await dialog.showOpenDialog({
-        properties: ['openFile'],
-        filters
-      })
+      const res = await dialog.showOpenDialog({ properties: ['openFile'], filters })
       if (res.canceled || !res.filePaths[0]) return null
       const p = res.filePaths[0]
-      const stats = await fileStats(p)
-      return { path: p, name: path.basename(p), sizeBytes: stats.sizeBytes }
+      return { path: p, name: path.basename(p), sizeBytes: fileSize(p) }
     }
   )
 
@@ -161,84 +241,15 @@ function registerIpc() {
 
   ipcMain.handle('api:openExternal', (_e, url: string) => shell.openExternal(url))
 
-  ipcMain.handle('api:submit', async (_e, input: SubmitTaskInput) => {
-    if (!process.env.VOLC_ARK_API_KEY) {
-      return { error: '未配置 VOLC_ARK_API_KEY（Seedance 2.0 需要 Ark API Key）' }
+  ipcMain.handle(
+    'api:submit',
+    async (_e, input: SubmitTaskInput): Promise<{ localId: string } | { error: string }> => {
+      if (!auth.getToken()) return { error: '未登录' }
+      try {
+        return await api.submitTask(input)
+      } catch (err) {
+        return { error: (err as Error).message }
+      }
     }
-
-    const localId = `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-    const now = Date.now()
-    const record: TaskRecord = {
-      id: '',
-      localId,
-      mode: input.mode,
-      prompt: input.prompt,
-      params: input.params,
-      assetsPreview: input.assets.map(a => ({
-        kind: a.kind,
-        label: a.mode === 'url' ? a.url : (a as { name: string }).name
-      })),
-      status: 'submitting',
-      createdAt: now,
-      updatedAt: now
-    }
-    tasks.set(localId, record)
-    broadcastTask(record)
-
-    const ctrl = new AbortController()
-    controllers.set(localId, ctrl)
-
-    try {
-      const payload = await buildPayload(input)
-      const { id } = await arkSubmit(payload)
-      updateTask(localId, { id, status: 'queued' })
-      pollUntilDone(id, {
-        signal: ctrl.signal,
-        onUpdate: (snap) => {
-          updateTask(localId, {
-            status: snap.status as TaskRecord['status'],
-            videoUrl: snap.content?.video_url,
-            lastFrameUrl: snap.content?.last_frame_url,
-            usage: snap.usage
-          })
-        }
-      })
-        .then((final) => {
-          controllers.delete(localId)
-          if (final.status === 'failed') {
-            const zh = translateArkError(0, final.error, final.error?.message)
-            updateTask(localId, {
-              status: 'failed',
-              error: { message: zh, raw: JSON.stringify(final) }
-            })
-          } else {
-            updateTask(localId, {
-              status: final.status as TaskRecord['status'],
-              videoUrl: final.content?.video_url,
-              lastFrameUrl: final.content?.last_frame_url,
-              usage: final.usage
-            })
-          }
-        })
-        .catch(handleBackgroundError(localId))
-      return { localId }
-    } catch (err) {
-      controllers.delete(localId)
-      const msg = err instanceof Error ? err.message : String(err)
-      const raw = err instanceof ArkError ? err.raw : undefined
-      updateTask(localId, { status: 'failed', error: { message: msg, raw } })
-      return { error: msg }
-    }
-  })
-}
-
-function handleBackgroundError(localId: string) {
-  return (err: unknown) => {
-    controllers.delete(localId)
-    const current = tasks.get(localId)
-    if (current?.status === 'cancelled') return
-    const raw = err instanceof ArkError ? err.raw : undefined
-    const msg = err instanceof Error ? err.message : String(err)
-    updateTask(localId, { status: 'failed', error: { message: msg, raw } })
-  }
+  )
 }

@@ -112,6 +112,7 @@ export type TaskStatus =
   | 'expired'
 
 export interface TaskRecord {
+  serverId: string
   id: string
   localId: string
   mode: GenerationMode
@@ -131,15 +132,34 @@ export interface ApiStatus {
   ark: { hasKey: boolean }
 }
 
+export interface AuthState {
+  loggedIn: boolean
+  email?: string
+  tenantId?: string
+}
+
 declare global {
   interface Window {
     seedland: {
+      // Auth
+      getAuthState: () => Promise<AuthState>
+      login: (email: string, password: string) => Promise<AuthState | { error: string }>
+      register: (
+        email: string,
+        password: string,
+        tenantName?: string
+      ) => Promise<AuthState | { error: string }>
+      logout: () => Promise<void>
+      // Tenant Ark Key
+      setArkKey: (key: string) => Promise<{ ok: true } | { error: string }>
+      getArkKeyStatus: () => Promise<{ hasKey: boolean }>
+      // Tasks (existing surface)
       getApiStatus: () => Promise<ApiStatus>
       submitTask: (
         input: SubmitTaskInput
       ) => Promise<{ localId: string } | { error: string }>
-      cancelTask: (localId: string) => Promise<void>
-      removeTask: (localId: string) => Promise<void>
+      cancelTask: (serverId: string) => Promise<void>
+      removeTask: (serverId: string) => Promise<void>
       listTasks: () => Promise<TaskRecord[]>
       clearTasks: () => Promise<void>
       pickFile: (
