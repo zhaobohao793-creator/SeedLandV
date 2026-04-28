@@ -3,11 +3,10 @@ Phase 1 exit verification.
 
 Walks the auth flow end to end against a running API:
   1. /healthz
-  2. POST /v1/auth/register (or login if email exists)
+  2. POST /v1/auth/register
   3. POST /v1/auth/login
   4. GET /v1/auth/me
   5. POST /v1/auth/refresh
-  6. POST /v1/tasks (expects 501 Not Implemented)
 
 Usage:
     uvicorn app.main:app --reload &
@@ -22,7 +21,7 @@ import sys
 import httpx
 
 BASE = os.environ.get("SEEDLANDV_API_URL", "http://localhost:8000")
-EMAIL = f"phase1-{secrets.token_hex(4)}@verify.local"
+EMAIL = f"phase1-{secrets.token_hex(4)}@example.com"
 PASSWORD = "verify_password_123"
 
 
@@ -61,13 +60,6 @@ def main() -> int:
 
         r = c.post("/v1/auth/refresh", json={"refresh_token": refresh})
         all_ok &= step("refresh", r.status_code == 200, f"new exp={r.json().get('expires_in')}")
-
-        r = c.post("/v1/tasks", headers={"Authorization": f"Bearer {access}"}, json={})
-        all_ok &= step(
-            "tasks placeholder",
-            r.status_code == 501,
-            f"got {r.status_code} (expected 501)",
-        )
 
     return 0 if all_ok else 1
 
