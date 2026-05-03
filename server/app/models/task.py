@@ -60,9 +60,17 @@ class Task(Base):
     ark_last_frame: Mapped[str | None] = mapped_column(String, nullable=True)
     tos_video_key: Mapped[str | None] = mapped_column(String, nullable=True)
     tos_video_url: Mapped[str | None] = mapped_column(String, nullable=True)
+    tos_video_url_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     usage: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     error: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    mirror_attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    mirror_last_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    mirror_error: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

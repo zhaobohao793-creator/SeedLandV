@@ -1,11 +1,12 @@
-"""Celery worker: drive a Task row through the Ark submit + poll lifecycle."""
+"""Celery worker: drive a Task row through the Ark submit + poll lifecycle,
+then mirror the finished video into our TOS bucket so we own the URL."""
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.ark.builder import ResolvedAsset, TaskParams, build_payload
@@ -20,6 +21,15 @@ from app.realtime.publisher import publish_task_update
 from app.workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
+
+# Phase 5: mirror retry budget and cooldowns.
+MIRROR_MAX_ATTEMPTS = 5
+MIRROR_RETRY_COOLDOWN = timedelta(minutes=5)
+# A row stuck in `mirroring` for longer than this means the worker that claimed
+# it crashed; the sweeper rolls it back to `succeeded` so it can be re-tried.
+MIRROR_STUCK_THRESHOLD = timedelta(minutes=15)
+# Re-sign URLs that will expire within this window.
+URL_REFRESH_LEAD = timedelta(hours=24)
 
 
 def _resolve_assets(session: Session, task_id: int) -> list[ResolvedAsset]:
@@ -238,6 +248,230 @@ def ark_submit_and_poll(self, task_id: int) -> str:  # noqa: ANN001
             _publish_snapshot(session, task)
             return TaskStatus.FAILED.value
 
-        # Terminal handling (final state already written by on_update).
-        # Phase 5 will enqueue tos_mirror_video here on success.
+        # Terminal handling (final state already written by on_update). On a
+        # successful Ark render, hand off to the mirror task — the row stays in
+        # `succeeded` and gets bumped to `completed` once TOS has the bytes.
+        if final.status == TaskStatus.SUCCEEDED.value:
+            t = session.get(Task, task_id)
+            if t is not None and t.ark_video_url and t.tos_video_key is None:
+                tos_mirror_video.delay(task_id)
         return final.status
+
+
+def _claim_mirror_row(session: Session, task_id: int) -> Task | None:
+    """Lock the row, validate state, bump attempt counter, transition to
+    MIRRORING. Returns the locked task on success, or None if we should bail
+    (already mirrored / wrong state / out of retries / contested by another
+    worker). Caller must `session.commit()` after this returns a row."""
+    task = session.execute(
+        select(Task).where(Task.id == task_id).with_for_update(skip_locked=True)
+    ).scalar_one_or_none()
+    if task is None:
+        return None
+    if task.tos_video_key is not None:
+        return None  # already mirrored
+    if not task.ark_video_url:
+        return None  # nothing to mirror
+    if task.status not in (TaskStatus.SUCCEEDED, TaskStatus.MIRRORING):
+        return None  # wrong state — don't touch terminal rows
+    if task.mirror_attempt >= MIRROR_MAX_ATTEMPTS:
+        # Permanent failure: keep the Ark URL (24h validity) but mark the row
+        # so the renderer knows there's no permanent mirror.
+        _update_status(
+            session,
+            task,
+            TaskStatus.COMPLETED_PARTIAL,
+            event_kind="mirror_giveup",
+            event_payload={"attempts": task.mirror_attempt},
+        )
+        return None
+    # Recent attempt? Another worker is/was on this row; wait for cooldown.
+    if (
+        task.mirror_last_attempt_at is not None
+        and datetime.now(UTC) - task.mirror_last_attempt_at < MIRROR_RETRY_COOLDOWN
+    ):
+        return None
+    task.mirror_attempt += 1
+    task.mirror_last_attempt_at = datetime.now(UTC)
+    _update_status(
+        session,
+        task,
+        TaskStatus.MIRRORING,
+        event_kind="mirror_start",
+        event_payload={"attempt": task.mirror_attempt},
+    )
+    return task
+
+
+@celery_app.task(name="tos.mirror_video", bind=True, max_retries=0)
+def tos_mirror_video(self, task_id: int) -> str:  # noqa: ANN001
+    """Pull `tasks.ark_video_url` into our TOS bucket. Idempotent on `task_id`.
+
+    Phase 1 (short txn): claim the row + bump attempt + transition to MIRRORING.
+    Phase 2 (no DB): stream Ark URL → SpooledTempFile → TOS PUT (slow network IO).
+    Phase 3 (short txn): record success or rewind status to SUCCEEDED for retry.
+    """
+    src_url: str | None = None
+    task_uuid = None
+    tenant_id = None
+    with SyncSessionLocal() as session:
+        task = _claim_mirror_row(session, task_id)
+        session.commit()
+        if task is None:
+            # _claim_mirror_row may have committed a give-up transition; publish
+            # a snapshot in that case so the renderer sees COMPLETED_PARTIAL.
+            t = session.get(Task, task_id)
+            if t is not None and t.status == TaskStatus.COMPLETED_PARTIAL:
+                _publish_snapshot(session, t)
+            return "skip"
+        _publish_snapshot(session, task)
+        src_url = task.ark_video_url
+        task_uuid = task.uuid
+        tenant_id = task.tenant_id
+
+    # --- network phase, no DB lock held ---
+    from app.storage.tos import (
+        SEVEN_DAYS_SECONDS,
+        build_video_key,
+        get_tos_client,
+        mirror_url_to_tos,
+    )
+
+    dest_key = build_video_key(task_uuid)
+    try:
+        tos_client = get_tos_client()
+        bytes_written = mirror_url_to_tos(
+            client=tos_client,
+            src_url=src_url,
+            dest_key=dest_key,
+            content_type="video/mp4",
+        )
+        signed_url = tos_client.generate_presigned_get_url(dest_key)
+    except Exception as e:
+        logger.exception("tos.mirror_video failed task_id=%s", task_id)
+        with SyncSessionLocal() as session:
+            t = session.get(Task, task_id)
+            if t is None:
+                return "missing"
+            t.mirror_error = {
+                "message": str(e),
+                "type": type(e).__name__,
+                "at": datetime.now(UTC).isoformat(),
+            }
+            # Roll status back to SUCCEEDED so the next sweep / retry can pick it
+            # up. Don't decrement attempt — we already burned one.
+            _update_status(
+                session,
+                t,
+                TaskStatus.SUCCEEDED,
+                event_kind="mirror_error",
+                event_payload={"message": str(e), "attempt": t.mirror_attempt},
+            )
+            session.commit()
+            _publish_snapshot(session, t)
+        return "failed"
+
+    signed_at = datetime.now(UTC)
+    expires_at = signed_at + timedelta(seconds=SEVEN_DAYS_SECONDS)
+    with SyncSessionLocal() as session:
+        t = session.get(Task, task_id)
+        if t is None:
+            return "missing"
+        t.tos_video_key = dest_key
+        t.tos_video_url = signed_url
+        t.tos_video_url_expires_at = expires_at
+        t.mirror_error = None
+        _update_status(
+            session,
+            t,
+            TaskStatus.COMPLETED,
+            event_kind="mirror_done",
+            event_payload={"bytes": bytes_written, "key": dest_key},
+        )
+        session.commit()
+        _publish_snapshot(session, t)
+    return "ok"
+
+
+@celery_app.task(name="tos.mirror_retry_sweep")
+def mirror_retry_sweep(limit: int = 100) -> dict[str, int]:
+    """Periodic sweep: re-enqueue mirror for stuck or failed rows.
+
+    Two passes:
+      1. Rows in MIRRORING for too long → roll back to SUCCEEDED (claimer crashed).
+      2. Rows in SUCCEEDED with no tos_video_key + retry budget left + cooldown elapsed.
+    """
+    now = datetime.now(UTC)
+    enqueued: list[int] = []
+    rolled_back = 0
+    with SyncSessionLocal() as session:
+        stuck = session.scalars(
+            select(Task).where(
+                Task.status == TaskStatus.MIRRORING,
+                Task.tos_video_key.is_(None),
+                Task.mirror_last_attempt_at < now - MIRROR_STUCK_THRESHOLD,
+            ).limit(limit)
+        ).all()
+        for t in stuck:
+            _update_status(
+                session,
+                t,
+                TaskStatus.SUCCEEDED,
+                event_kind="mirror_stuck_rollback",
+                event_payload={"attempt": t.mirror_attempt},
+            )
+            rolled_back += 1
+        if rolled_back:
+            session.commit()
+            for t in stuck:
+                _publish_snapshot(session, t)
+
+        candidates = session.scalars(
+            select(Task.id).where(
+                Task.status == TaskStatus.SUCCEEDED,
+                Task.tos_video_key.is_(None),
+                Task.mirror_attempt < MIRROR_MAX_ATTEMPTS,
+                or_(
+                    Task.mirror_last_attempt_at.is_(None),
+                    Task.mirror_last_attempt_at < now - MIRROR_RETRY_COOLDOWN,
+                ),
+            ).limit(limit)
+        ).all()
+        enqueued = list(candidates)
+
+    for tid in enqueued:
+        tos_mirror_video.delay(tid)
+    return {"enqueued": len(enqueued), "rolled_back": rolled_back}
+
+
+@celery_app.task(name="tos.signed_url_refresh")
+def signed_url_refresh(limit: int = 500) -> dict[str, int]:
+    """Re-sign TOS URLs that fall within the refresh lead window. Cheap — no
+    upload, just a fresh `pre_signed_url` call per row."""
+    cutoff = datetime.now(UTC) + URL_REFRESH_LEAD
+    refreshed = 0
+    with SyncSessionLocal() as session:
+        rows = session.scalars(
+            select(Task).where(
+                Task.tos_video_key.is_not(None),
+                or_(
+                    Task.tos_video_url_expires_at.is_(None),
+                    Task.tos_video_url_expires_at < cutoff,
+                ),
+            ).limit(limit)
+        ).all()
+        if not rows:
+            return {"refreshed": 0}
+
+        from app.storage.tos import SEVEN_DAYS_SECONDS, get_tos_client
+
+        tos_client = get_tos_client()
+        new_expiry = datetime.now(UTC) + timedelta(seconds=SEVEN_DAYS_SECONDS)
+        for t in rows:
+            t.tos_video_url = tos_client.generate_presigned_get_url(t.tos_video_key)
+            t.tos_video_url_expires_at = new_expiry
+            refreshed += 1
+        session.commit()
+        for t in rows:
+            _publish_snapshot(session, t)
+    return {"refreshed": refreshed}

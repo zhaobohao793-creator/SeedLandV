@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 from unittest.mock import MagicMock
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -10,11 +11,16 @@ from app.storage.tos import (
     SEVEN_DAYS_SECONDS,
     TosClient,
     build_object_key,
+    build_video_key,
+    mirror_url_to_tos,
 )
 
 
 class _FakeSdk:
-    """Stand-in for tos.TosClientV2; records calls so tests can assert."""
+    """Stand-in for tos.TosClientV2; records calls so tests can assert.
+
+    Note: drains `content` into `body_bytes` immediately because the caller may
+    close a SpooledTemporaryFile after the put_object call returns."""
 
     def __init__(self, **kwargs) -> None:
         self.init_kwargs = kwargs
@@ -22,6 +28,9 @@ class _FakeSdk:
         self.sign_calls: list[dict] = []
 
     def put_object(self, **kwargs):
+        body = kwargs.get("content")
+        if body is not None and hasattr(body, "read"):
+            kwargs["body_bytes"] = body.read()
         self.put_calls.append(kwargs)
         return MagicMock(etag="fake-etag")
 
@@ -136,3 +145,122 @@ def test_build_object_key_extension_handling(ext, expected_suffix):
     else:
         # No dot in the final segment when no extension
         assert "." not in k.split("/")[-1]
+
+
+def test_build_video_key_shape_and_uuid_segment():
+    u = uuid4()
+    k = build_video_key(u)
+    assert k.startswith("seedlandv/videos/")
+    assert k.endswith(f"/{u}/video.mp4")
+    parts = k.split("/")
+    # seedlandv / videos / yyyy / mm / dd / <uuid> / video.mp4
+    assert parts[0] == "seedlandv"
+    assert parts[1] == "videos"
+    assert len(parts[2]) == 4 and parts[2].isdigit()
+    assert len(parts[3]) == 2 and parts[3].isdigit()
+    assert len(parts[4]) == 2 and parts[4].isdigit()
+    UUID(parts[5])  # well-formed
+    assert parts[6] == "video.mp4"
+
+
+def test_build_video_key_accepts_str_uuid():
+    s = str(uuid4())
+    k = build_video_key(s)
+    assert k.endswith(f"/{s}/video.mp4")
+
+
+class _FakeStreamCtx:
+    """Stand-in for `httpx.stream(...)` context manager."""
+
+    def __init__(self, *, chunks: list[bytes], status_code: int = 200) -> None:
+        self._chunks = chunks
+        self.status_code = status_code
+        self.raise_called = False
+
+    def raise_for_status(self) -> None:
+        self.raise_called = True
+        if self.status_code >= 400:
+            raise RuntimeError(f"http {self.status_code}")
+
+    def iter_bytes(self, chunk_size: int):  # noqa: ARG002 — mirror httpx signature
+        yield from self._chunks
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _stream_factory(chunks: list[bytes], *, status: int = 200):
+    seen = {}
+
+    def factory(method, url, *, timeout, follow_redirects):  # noqa: ARG001
+        seen["method"] = method
+        seen["url"] = url
+        seen["timeout"] = timeout
+        seen["follow_redirects"] = follow_redirects
+        return _FakeStreamCtx(chunks=chunks, status_code=status)
+
+    return factory, seen
+
+
+def test_mirror_url_to_tos_streams_into_put_with_correct_size():
+    holder: list[_FakeSdk] = []
+    c = _make_client(holder)
+    chunks = [b"abc", b"defgh"]  # 8 bytes total
+    factory, seen = _stream_factory(chunks)
+
+    n = mirror_url_to_tos(
+        client=c,
+        src_url="https://upstream.example/v.mp4",
+        dest_key="seedlandv/videos/2026/05/03/x/video.mp4",
+        content_type="video/mp4",
+        http_factory=factory,
+    )
+
+    assert n == 8
+    assert seen["method"] == "GET"
+    assert seen["url"] == "https://upstream.example/v.mp4"
+    assert seen["follow_redirects"] is True
+
+    sdk = holder[0]
+    assert len(sdk.put_calls) == 1
+    call = sdk.put_calls[0]
+    assert call["bucket"] == "my-bucket"
+    assert call["key"] == "seedlandv/videos/2026/05/03/x/video.mp4"
+    assert call["content_type"] == "video/mp4"
+    assert call["content_length"] == 8
+    # SpooledTemporaryFile is rewound to 0 before put_object — drained on call
+    assert call["body_bytes"] == b"abcdefgh"
+
+
+def test_mirror_url_to_tos_raises_on_zero_bytes():
+    holder: list[_FakeSdk] = []
+    c = _make_client(holder)
+    factory, _ = _stream_factory([b"", b""])
+
+    with pytest.raises(RuntimeError, match="0 bytes"):
+        mirror_url_to_tos(
+            client=c,
+            src_url="https://upstream.example/empty",
+            dest_key="seedlandv/videos/x/empty.mp4",
+            http_factory=factory,
+        )
+    # Must not have called TOS PUT for an empty body
+    assert holder[0].put_calls == []
+
+
+def test_mirror_url_to_tos_propagates_http_errors():
+    holder: list[_FakeSdk] = []
+    c = _make_client(holder)
+    factory, _ = _stream_factory([b"unused"], status=404)
+
+    with pytest.raises(RuntimeError, match="http 404"):
+        mirror_url_to_tos(
+            client=c,
+            src_url="https://upstream.example/missing",
+            dest_key="seedlandv/videos/x/missing.mp4",
+            http_factory=factory,
+        )
+    assert holder[0].put_calls == []

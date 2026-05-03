@@ -1,5 +1,5 @@
 import json
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -200,3 +200,38 @@ async def delete_task(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "task not found")
     await session.delete(task)
     await session.commit()
+
+
+@router.get("/{server_id}/video-url")
+async def get_task_video_url(
+    server_id: UUID,
+    session: AsyncSession = Depends(get_session),
+    user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Re-sign a fresh 7d TOS GET URL for a mirrored video. The cached URL on
+    the row is updated as a side effect so subsequent WS snapshots stay fresh."""
+    task = await session.scalar(
+        select(Task).where(Task.uuid == server_id, Task.tenant_id == user.tenant_id)
+    )
+    if task is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "task not found")
+    if not task.tos_video_key:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "video has not been mirrored yet"
+        )
+
+    from app.storage.tos import SEVEN_DAYS_SECONDS, get_tos_client
+
+    tos_client = get_tos_client()
+    url = tos_client.generate_presigned_get_url(task.tos_video_key)
+    expires_at = datetime.now(UTC) + timedelta(seconds=SEVEN_DAYS_SECONDS)
+
+    task.tos_video_url = url
+    task.tos_video_url_expires_at = expires_at
+    await session.commit()
+
+    return {
+        "video_url": url,
+        "expires_at": expires_at.isoformat(),
+        "ttl_seconds": SEVEN_DAYS_SECONDS,
+    }

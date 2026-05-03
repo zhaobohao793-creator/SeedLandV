@@ -14,3 +14,4 @@ server/.pytest_cache/
 server/.ruff_cache/
 server/htmlcov/
 server/.coverage
+server/celerybeat-schedule*

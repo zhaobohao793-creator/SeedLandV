@@ -1,19 +1,24 @@
 """Volcengine TOS client wrapper.
 
-Two surfaces only:
+Surfaces:
   - put_object_streaming(): server-proxied multipart upload from FastAPI
   - generate_presigned_get_url(): 7d URL handed to Ark so it can fetch the asset
+  - mirror_url_to_tos(): Phase 5 — pull a remote URL into TOS (used to mirror
+    the Ark-hosted finished video into our bucket before the upstream URL expires)
 
-Object key shape: `seedlandv/uploads/{yyyy}/{mm}/{dd}/{uuid4}{ext}` — date prefix
-makes lifecycle policies and bulk audits straightforward.
+Object key shapes:
+  - uploads:  `seedlandv/uploads/{yyyy}/{mm}/{dd}/{uuid4}{ext}`
+  - videos:   `seedlandv/videos/{yyyy}/{mm}/{dd}/{task_uuid}/video.mp4`
 """
 from __future__ import annotations
 
+import tempfile
 from datetime import UTC, datetime
 from functools import lru_cache
 from typing import IO
-from uuid import uuid4
+from uuid import UUID, uuid4
 
+import httpx
 import tos
 from tos import HttpMethodType
 
@@ -21,6 +26,10 @@ from app.config import get_settings
 
 
 SEVEN_DAYS_SECONDS = 7 * 24 * 3600
+# Spool boundary for mirror downloads — videos under 64 MiB stay in RAM, larger
+# ones spill to a tmpfile so we don't OOM on long renders.
+_MIRROR_SPOOL_BYTES = 64 * 1024 * 1024
+_MIRROR_CHUNK_BYTES = 1024 * 1024
 
 
 def build_object_key(extension: str | None) -> str:
@@ -29,6 +38,13 @@ def build_object_key(extension: str | None) -> str:
         ext = "." + ext
     now = datetime.now(UTC)
     return f"seedlandv/uploads/{now:%Y/%m/%d}/{uuid4().hex}{ext.lower()}"
+
+
+def build_video_key(task_uuid: UUID | str) -> str:
+    """Mirrored-video object key. Stable per-task: re-mirroring the same row
+    overwrites the same key (idempotent on retry)."""
+    now = datetime.now(UTC)
+    return f"seedlandv/videos/{now:%Y/%m/%d}/{task_uuid}/video.mp4"
 
 
 class TosClient:
@@ -77,6 +93,46 @@ class TosClient:
             expires=ttl_seconds,
         )
         return out.signed_url
+
+
+def mirror_url_to_tos(
+    *,
+    client: TosClient,
+    src_url: str,
+    dest_key: str,
+    content_type: str | None = None,
+    timeout: float = 300.0,
+    http_factory=httpx.stream,
+) -> int:
+    """Stream src_url into TOS at dest_key. Returns bytes written.
+
+    Two-phase: download into a SpooledTemporaryFile (RAM up to ~64 MiB, disk
+    above), then put_object once total size is known. We need content_length up
+    front because TOS PUT prefers it; chunked transfer-encoding is not part of
+    our wrapper surface.
+
+    `http_factory` is overridable so unit tests can swap in respx without an
+    actual TLS stack.
+    """
+    with tempfile.SpooledTemporaryFile(max_size=_MIRROR_SPOOL_BYTES) as buf:
+        with http_factory(
+            "GET", src_url, timeout=timeout, follow_redirects=True
+        ) as r:
+            r.raise_for_status()
+            for chunk in r.iter_bytes(_MIRROR_CHUNK_BYTES):
+                if chunk:
+                    buf.write(chunk)
+        size = buf.tell()
+        if size == 0:
+            raise RuntimeError("mirror download returned 0 bytes")
+        buf.seek(0)
+        client.put_object_streaming(
+            dest_key,
+            buf,
+            content_type=content_type,
+            content_length=size,
+        )
+        return size
 
 
 @lru_cache
