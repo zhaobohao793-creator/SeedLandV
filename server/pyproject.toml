@@ -21,6 +21,7 @@ dependencies = [
   "cryptography>=44.0",
   "websockets>=14.1",
   "gevent>=24.11; python_version < '3.13'",
+  "sentry-sdk[fastapi,celery]>=2.18",
 ]
 
 [project.optional-dependencies]

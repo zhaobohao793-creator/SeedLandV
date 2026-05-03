@@ -2,10 +2,12 @@ from celery import Celery
 from celery.schedules import crontab
 
 from app.config import get_settings
+from app.observability.sentry import init_sentry
 
 
 def _make_celery() -> Celery:
     s = get_settings()
+    init_sentry(s, integration="celery")
     app = Celery(
         "seedlandv",
         broker=s.redis_url,

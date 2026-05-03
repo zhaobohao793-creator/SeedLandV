@@ -37,6 +37,15 @@ class Settings(BaseSettings):
     )
     volc_tos_bucket: str = Field(alias="VOLC_TOS_BUCKET")
 
+    # Phase 6: per-tenant Ark submit rate limit (fixed window, 1h).
+    ark_submit_rate_limit_per_hour: int = Field(
+        default=100, alias="ARK_SUBMIT_RATE_LIMIT_PER_HOUR"
+    )
+
+    # Phase 6: Sentry — empty DSN disables (no-op init).
+    sentry_dsn: str = Field(default="", alias="SENTRY_DSN")
+    sentry_env: str = Field(default="dev", alias="SENTRY_ENV")
+
 
 @lru_cache
 def get_settings() -> Settings:

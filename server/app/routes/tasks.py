@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,6 +20,7 @@ from app.schemas.tasks import (
     SubmitTaskResponse,
     TaskOut,
 )
+from app.storage.quota import consume_ark_submit_quota
 
 router = APIRouter(prefix="/v1/tasks", tags=["tasks"])
 
@@ -86,9 +87,30 @@ def _to_task_out(task: Task, assets: list[TaskAsset]) -> TaskOut:
 @router.post("", response_model=SubmitTaskResponse, status_code=status.HTTP_202_ACCEPTED)
 async def submit_task(
     req: SubmitTaskRequest,
+    response: Response,
     session: AsyncSession = Depends(get_session),
     user: User = Depends(get_current_user),
 ) -> SubmitTaskResponse:
+    # Phase 6: per-tenant fixed-window quota. Always emits X-RateLimit-* so the
+    # renderer can show "X submits left this hour"; rejects with 429 +
+    # Retry-After when over budget. Counter increments even on rejection so
+    # spammers don't game the bucket via concurrent retries.
+    quota = consume_ark_submit_quota(user.tenant_id)
+    response.headers["X-RateLimit-Limit"] = str(quota.limit)
+    response.headers["X-RateLimit-Remaining"] = str(quota.remaining)
+    response.headers["X-RateLimit-Reset"] = str(quota.reset_in_seconds)
+    if not quota.allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"已达到每小时提交上限({quota.limit}),请 {quota.reset_in_seconds}s 后再试",
+            headers={
+                "Retry-After": str(quota.reset_in_seconds),
+                "X-RateLimit-Limit": str(quota.limit),
+                "X-RateLimit-Remaining": "0",
+                "X-RateLimit-Reset": str(quota.reset_in_seconds),
+            },
+        )
+
     task = Task(
         tenant_id=user.tenant_id,
         user_id=user.id,
