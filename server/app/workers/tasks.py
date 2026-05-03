@@ -27,13 +27,20 @@ def _resolve_assets(session: Session, task_id: int) -> list[ResolvedAsset]:
         select(TaskAsset).where(TaskAsset.task_id == task_id).order_by(TaskAsset.position)
     ).all()
     resolved: list[ResolvedAsset] = []
+    tos_client = None
     for row in rows:
         if row.source == "url":
             url = row.origin_url
+        elif row.source == "upload":
+            if not row.tos_key:
+                raise RuntimeError(f"task_assets.id={row.id} upload row missing tos_key")
+            if tos_client is None:
+                from app.storage.tos import get_tos_client
+                tos_client = get_tos_client()
+            url = tos_client.generate_presigned_get_url(row.tos_key)
         else:
-            # Phase 4 wires TOS signed URLs here.
             raise RuntimeError(
-                "asset uploads not implemented until Phase 4 — submit URLs only for now"
+                f"task_assets.id={row.id} unknown source={row.source!r}"
             )
         if not url:
             raise RuntimeError(f"task_assets.id={row.id} missing url")

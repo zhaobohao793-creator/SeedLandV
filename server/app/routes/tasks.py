@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 from typing import Any
 from uuid import UUID
@@ -10,6 +11,7 @@ from app.auth.deps import get_current_user
 from app.db.session import get_session
 from app.models import Task, TaskAsset, User
 from app.models.enums import TaskStatus
+from app.routes.assets import _redis as _assets_redis, asset_token_key
 from app.schemas.tasks import (
     AssetPreview,
     AssetSourceUpload,
@@ -24,6 +26,31 @@ router = APIRouter(prefix="/v1/tasks", tags=["tasks"])
 
 def _params_to_jsonb(p) -> dict[str, Any]:
     return p.model_dump(exclude_none=True)
+
+
+async def _resolve_asset_token(token: str, user: User) -> dict[str, Any]:
+    """Look up an asset_token in Redis; enforce tenant ownership + non-expiry."""
+    raw = await _assets_redis().get(asset_token_key(token))
+    if raw is None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "asset_token 无效或已过期,请重新上传"
+        )
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError) as e:
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR, "asset_token 数据损坏"
+        ) from e
+    if data.get("tenant_id") != str(user.tenant_id):
+        # Don't leak existence — same error as missing.
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "asset_token 无效或已过期,请重新上传"
+        )
+    if not data.get("tos_key"):
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR, "asset_token 缺少 tos_key"
+        )
+    return data
 
 
 def _epoch_ms(dt: datetime | None) -> int:
@@ -86,10 +113,22 @@ async def submit_task(
                 )
             )
         elif isinstance(asset, AssetSourceUpload):
-            # Phase 2: accept the shape, fail fast — Phase 4 wires asset_token resolution.
-            raise HTTPException(
-                status.HTTP_501_NOT_IMPLEMENTED,
-                "asset uploads not implemented until Phase 4 — pass mode='url' for now",
+            resolved = await _resolve_asset_token(asset.asset_token, user)
+            if resolved["kind"] != asset.kind.value:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    f"asset_token kind mismatch (token={resolved['kind']}, request={asset.kind.value})",
+                )
+            session.add(
+                TaskAsset(
+                    task_id=task.id,
+                    position=idx,
+                    kind=asset.kind.value,
+                    source="upload",
+                    tos_key=resolved["tos_key"],
+                    mime=resolved.get("mime"),
+                    size_bytes=resolved.get("size_bytes"),
+                )
             )
 
     await session.commit()
