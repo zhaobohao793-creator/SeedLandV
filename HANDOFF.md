@@ -1,8 +1,8 @@
 # SeedLandV 生产化迁移 — 会话交接文档
 
 **更新于**:2026-05-03
-**当前状态**:Phase 0-4 完成,Phase 4 端到端 smoke 通过(真上传 → 真 TOS → 真签名 URL)
-**下一步**:Phase 5 — TOS 产物镜像 + 签名 URL 刷新
+**当前状态**:Phase 0-5 完成,镜像 + 签名 URL 端到端 smoke 通过(真上传 → 真 TOS 镜像 → 真 7d URL)
+**下一步**:Phase 6 — 限流 + 重试 + 监控
 **项目根**:`/Applications/SeedLandV/SeedLandV`(Mac;原 Windows 路径 `d:\SeedLandV` 已废弃)
 
 ---
@@ -16,8 +16,8 @@
 | Phase 2 — Ark Python 端口 + Celery worker | ✅ 37/37 单测 + 端到端 | `pytest -q` 1.4s |
 | Phase 3 — WS 路由 + Electron 瘦身 | ✅ 真 Ark Key 文生视频跑通 | 见 §3 |
 | Phase 4 — 资产上传 → TOS | ✅ 48/48 单测 + 端到端 smoke | 见 §5 |
-| Phase 5 — TOS 镜像 + 签名 URL | ⏳ 待开 | 详 §6 |
-| Phase 6 — 限流 + 重试 + 监控 | ⏳ | |
+| Phase 5 — TOS 镜像 + 签名 URL 续签 | ✅ 53/53 单测 + 端到端 smoke | 见 §6 |
+| Phase 6 — 限流 + 重试 + 监控 | ⏳ 待开 | 详 §7 |
 | Phase 7 — Helm + VKE 部署 | ⏳ | |
 
 ---
@@ -31,14 +31,20 @@ cd /Applications/SeedLandV/SeedLandV
 export PATH="/Applications/Docker.app/Contents/Resources/bin:$PATH"
 docker compose -f docker-compose.dev.yml up -d
 
-# 2) 起 API(终端 A)
-cd server && .venv/bin/uvicorn app.main:app --reload
+# 2) 起 API(终端 A — 注意:不带 --reload。改 server 代码必须 pkill + 重起,否则 curl 跑老代码假绿)
+cd server && nohup .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/seedlandv-uvicorn.log 2>&1 &
 
-# 3) 起 worker(终端 B)
-cd server && .venv/bin/celery -A app.workers.celery_app:celery_app worker -P solo --loglevel=info
+# 3) 起 worker(终端 B — 加 -B 启 beat,跑 mirror_retry_sweep + signed_url_refresh)
+cd server && nohup .venv/bin/celery -A app.workers.celery_app:celery_app worker -B -P solo --loglevel=info > /tmp/seedlandv-celery.log 2>&1 &
 
 # 4) 起 Electron(终端 C — 注意 Cursor 终端必须 unset 那个变量)
 env -u ELECTRON_RUN_AS_NODE npm run dev
+```
+
+**重启 server/worker 流程**:
+```bash
+pkill -f "uvicorn app.main"; pkill -f "celery -A app.workers.celery_app"; sleep 2
+# ...再按上面 step 2/3 起
 ```
 
 **docker CLI 路径坑**:Mac 上 docker-compose 默认找不到 `docker-credential-desktop`,把 `/Applications/Docker.app/Contents/Resources/bin` 加 PATH 就好。
@@ -96,7 +102,7 @@ eb419ec feat(server): probe Ark Key liveness before persisting
 ## 4. 验证步骤(可选,确认环境没坏)
 
 ```bash
-cd server && .venv/bin/pytest -q                        # 期 48 passed (Phase 4 加了 11)
+cd server && .venv/bin/pytest -q                        # 期 53 passed (Phase 5 加了 5)
 .venv/bin/python scripts/verify_phase0.py               # 期 3 行 [OK]
 .venv/bin/python scripts/verify_phase1.py && echo $?    # 期 5 行 [OK] + exit 0
 cd .. && npm run typecheck                              # 期无输出
@@ -177,17 +183,82 @@ size_bytes}`。submit 时把 `{kind, mode: 'upload', asset_token}` 放在 assets
 
 ---
 
-## 6. Phase 5 — TOS 产物镜像(预览,等 Phase 4 后再做)
+## 6. Phase 5 实装一览 — TOS 镜像 + 签名 URL 续签(已 commit)
 
-- `app/workers/tasks.py::tos_mirror_video(task_id)` — `SELECT FOR UPDATE SKIP LOCKED WHERE status='succeeded' AND tos_video_key IS NULL`,流式从 Ark URL 拉到 TOS `videos/{yyyy}/{mm}/{dd}/{uuid}/video.mp4`
-- `ark_submit_and_poll` succeeded 时 `tos_mirror_video.delay(task_id)`
-- `GET /v1/tasks/{uuid}/video-url` — 取 tos_video_key 现签 7d URL
-- Celery beat:`mirror_retry_sweep`(小时)+ `signed_url_refresh`(每天)
-- WS 推送优先 `tos_video_url`,fallback `ark_video_url`
+### 数据流
+Ark 跑完 → `ark_submit_and_poll` 看到 `final.status=='succeeded'` 且 row 有
+`ark_video_url` + 没有 `tos_video_key` → `tos_mirror_video.delay(task_id)`。
+镜像 worker 三段事务:
+1. `SELECT … FOR UPDATE SKIP LOCKED` 锁行,验证状态/重试预算/冷却,bump
+   `mirror_attempt`,转 `MIRRORING`,commit 释锁。
+2. **无锁网络段**:`mirror_url_to_tos` httpx stream 拉 Ark URL 到
+   SpooledTemporaryFile(< 64MiB 内存,> 落盘),知道总长后整块 PUT 进 TOS
+   `seedlandv/videos/{yyyy}/{mm}/{dd}/{task_uuid}/video.mp4`。
+3. 短事务写 `tos_video_key` + `tos_video_url` (7d 签名) +
+   `tos_video_url_expires_at` + status=COMPLETED;失败则回滚状态到 SUCCEEDED 留
+   重试,permanent give-up(`mirror_attempt >= 5`)→ COMPLETED_PARTIAL。
+
+### Server side(`server/app/`)
+**新增**:
+- `alembic/versions/20260503_0002_phase5_video_mirror.py` — `tasks` 表加 4 列:
+  `tos_video_url_expires_at`、`mirror_attempt`、`mirror_last_attempt_at`、
+  `mirror_error`;部分索引 `ix_tasks_mirror_pending` /
+  `ix_tasks_url_refresh` 用于 sweeper 走索引扫描。
+- `storage/tos.py::build_video_key(task_uuid)` — 稳定 key 形,重试 PUT 同一对象
+  保证幂等。
+- `storage/tos.py::mirror_url_to_tos(client, src_url, dest_key, ...)` — httpx
+  stream → SpooledTemporaryFile → tos PUT,`http_factory` 可注入便于测试。
+
+**修改**:
+- `workers/tasks.py` — 加 `tos_mirror_video`(三段事务版),`mirror_retry_sweep`
+  (滚回 stuck `mirroring` + 重新入队冷却结束的 `succeeded`),
+  `signed_url_refresh`(24h 内到期就续签),常量 `MIRROR_MAX_ATTEMPTS=5`、
+  `MIRROR_RETRY_COOLDOWN=5min`、`MIRROR_STUCK_THRESHOLD=15min`、
+  `URL_REFRESH_LEAD=24h`。`ark_submit_and_poll` 末尾 hook
+  `tos_mirror_video.delay()`。
+- `workers/celery_app.py` — `beat_schedule`:`mirror_retry_sweep` 每小时,
+  `signed_url_refresh` 每日 02:00 UTC;timezone=UTC。
+- `routes/tasks.py` — `GET /v1/tasks/{server_id}/video-url` 现签 7d URL,
+  顺手把 `tos_video_url` + `tos_video_url_expires_at` 写回行(下次 WS 快照即用
+  最新 URL)。404 不存在,409 没镜像。
+
+### 与原计划的偏离
+原计划没写"sweeper 同时清扫 stuck `mirroring` 行"。实际加了——为了正确处理
+worker 在第 2 段网络 IO 中崩溃的情况(行卡 `mirroring` 但锁已释放)。
+`MIRROR_STUCK_THRESHOLD=15min` 之后 sweep 会把它滚回 `succeeded` 让重试。
+
+### 端到端 smoke(本次会话已跑)
+1. 假装 Ark 跑完:用 TOS 自己的 `seedlandv/uploads/...` 当 upstream URL,造一行
+   `status='succeeded'` 的任务 → `tos_mirror_video.delay(id)` →
+   行变 MIRRORING → COMPLETED,`tos_video_key` 写好,7d URL 可访问 ✅
+2. `GET /v1/tasks/{uuid}/video-url` 200 + URL 字节匹配,row.tos_video_url 被刷新 ✅
+3. 同 endpoint:不存在 → 404 ✅;未镜像 → 409 + "video has not been mirrored yet" ✅
+4. `signed_url_refresh()` 直调:把行的 expires_at 倒拨到 12h 后,跑刷新,URL 变 +
+   expires_at 推到 7d 后 ✅
+5. `mirror_retry_sweep()` 直调:`enqueued: 3, rolled_back: 0`,worker 串行处理,
+   网络可达的成功 → COMPLETED;`https://example/v.mp4` ConnectError → 滚回
+   SUCCEEDED + `mirror_error.type='ConnectError'` ✅
+
+### 启 beat
+开发期 worker 加 `-B` 启 in-process beat:
+```bash
+celery -A app.workers.celery_app:celery_app worker -B -P solo --loglevel=info
+```
+生产部署再拆出独立 `celery beat` 进程。
 
 ---
 
-## 7. 已知坑 / 已记录到 memory
+## 7. Phase 6 预览 — 限流 + 重试 + 监控
+
+- 每租户 token bucket(Redis-backed)限流 Celery 投递 + Ark 调用
+- `attempt` 列改 indeterministic exponential backoff,可重试错误自动 re-enqueue
+- 大文件 presigned PUT 直传 TOS(目前是 server 中转;200MB 视频会吃 200MB RSS)
+- 监控:Prometheus exporter + Sentry(任务失败、镜像 give-up、URL 刷新延迟)
+- API /healthz 加 deps check(DB / Redis / TOS)
+
+---
+
+## 8. 已知坑 / 已记录到 memory
 
 | 坑 | 表现 | 怎么避 |
 |---|---|---|
@@ -198,7 +269,7 @@ size_bytes}`。submit 时把 `{kind, mode: 'upload', asset_token}` 放在 assets
 
 ---
 
-## 8. 当前后台进程(本次会话留下,可能还在跑)
+## 9. 当前后台进程(本次会话留下,可能还在跑)
 
 ```bash
 # 查
@@ -217,6 +288,6 @@ docker compose -f docker-compose.dev.yml down
 
 ---
 
-## 9. 下一会话开场白模板
+## 10. 下一会话开场白模板
 
-> 继续 SeedLandV。Phase 0-4 已完成,资产上传端到端 smoke 通过,代码全 commit 在 `init` 分支。先读 `/Applications/SeedLandV/SeedLandV/HANDOFF.md` 拿状态,按 §2 起服务(注意 uvicorn 没有 --reload,celery 也没有 autoreload —— 改完代码必须重启对应进程),跑 §4 验证一下没坏,然后开 §6 Phase 5(TOS 镜像 + 签名 URL 刷新)。
+> 继续 SeedLandV。Phase 0-5 已完成,镜像 + 签名 URL 端到端 smoke 通过,代码全 commit 在 `init` 分支。先读 `/Applications/SeedLandV/SeedLandV/HANDOFF.md` 拿状态,按 §2 起服务(uvicorn 没 --reload,celery 加 -B 启 beat —— 改 server 代码必须 pkill + 重启),跑 §4 验证一下没坏,然后开 §7 Phase 6(限流 + 重试 + 监控)。
