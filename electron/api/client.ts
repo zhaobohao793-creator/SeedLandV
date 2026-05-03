@@ -5,6 +5,7 @@
 import type { SubmitTaskInput, TaskRecord, TaskStatus, AssetSource } from '@shared/types'
 import type { Auth } from './auth'
 import type { Http } from './http'
+import { AssetUploader } from './upload'
 import { validateByMode } from '@shared/validate'
 
 interface ServerTaskOut {
@@ -46,10 +47,14 @@ function fromServer(t: ServerTaskOut): TaskRecord {
 }
 
 export class ApiClient {
+  private uploader: AssetUploader
+
   constructor(
     private http: Http,
     private auth: Auth
-  ) {}
+  ) {
+    this.uploader = new AssetUploader(http)
+  }
 
   /** Wraps a request with one auto-refresh on 401. */
   private async withRefresh<T>(fn: () => Promise<T>): Promise<T> {
@@ -72,13 +77,18 @@ export class ApiClient {
     validateByMode(input.mode, input.assets)
 
     const localId = `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-    const assets = input.assets.map((a: AssetSource) => {
-      if (a.mode === 'url') {
-        return { kind: a.kind, mode: 'url' as const, url: a.url }
-      }
-      // Phase 4 will accept asset_token from a prior /v1/assets upload.
-      throw new Error('本地文件上传将在 Phase 4 接通；当前只接受 URL 素材')
-    })
+
+    // Resolve any local-file assets up to TOS first; server only sees `url`/`upload`.
+    const assets = await Promise.all(
+      input.assets.map(async (a: AssetSource) => {
+        if (a.mode === 'url') {
+          return { kind: a.kind, mode: 'url' as const, url: a.url }
+        }
+        // mode === 'local' — upload now, hand back the opaque token.
+        const out = await this.withRefresh(() => this.uploader.uploadFile(a.path, a.kind))
+        return { kind: a.kind, mode: 'upload' as const, asset_token: out.asset_token }
+      })
+    )
 
     await this.withRefresh(() =>
       this.http.post<{ server_id: string; localId: string; status: TaskStatus }>(
