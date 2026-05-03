@@ -1,8 +1,8 @@
 # SeedLandV 生产化迁移 — 会话交接文档
 
 **更新于**:2026-05-03
-**当前状态**:Phase 0-5 完成,镜像 + 签名 URL 端到端 smoke 通过(真上传 → 真 TOS 镜像 → 真 7d URL)
-**下一步**:Phase 6 — 限流 + 重试 + 监控
+**当前状态**:Phase 0-6 完成,可靠性 + 限流 + 健康检查 + Sentry 上线
+**下一步**:Phase 6b/7 — TOS 直传 (presigned PUT + CORS) + Prometheus + Helm/VKE
 **项目根**:`/Applications/SeedLandV/SeedLandV`(Mac;原 Windows 路径 `d:\SeedLandV` 已废弃)
 
 ---
@@ -17,8 +17,9 @@
 | Phase 3 — WS 路由 + Electron 瘦身 | ✅ 真 Ark Key 文生视频跑通 | 见 §3 |
 | Phase 4 — 资产上传 → TOS | ✅ 48/48 单测 + 端到端 smoke | 见 §5 |
 | Phase 5 — TOS 镜像 + 签名 URL 续签 | ✅ 53/53 单测 + 端到端 smoke | 见 §6 |
-| Phase 6 — 限流 + 重试 + 监控 | ⏳ 待开 | 详 §7 |
-| Phase 7 — Helm + VKE 部署 | ⏳ | |
+| Phase 6 — 重试 + 限流 + 健康检查 + Sentry | ✅ 68/68 单测 + 端到端 smoke | 见 §7 |
+| Phase 6b — TOS presigned PUT 直传 + CORS | ⏳ 待开 | 200MB 视频 server 中转吃 RSS |
+| Phase 7 — Prometheus + Helm + VKE | ⏳ | 上线后才有意义 |
 
 ---
 
@@ -102,9 +103,10 @@ eb419ec feat(server): probe Ark Key liveness before persisting
 ## 4. 验证步骤(可选,确认环境没坏)
 
 ```bash
-cd server && .venv/bin/pytest -q                        # 期 53 passed (Phase 5 加了 5)
+cd server && .venv/bin/pytest -q                        # 期 68 passed (Phase 6 加了 15)
 .venv/bin/python scripts/verify_phase0.py               # 期 3 行 [OK]
 .venv/bin/python scripts/verify_phase1.py && echo $?    # 期 5 行 [OK] + exit 0
+curl -s http://127.0.0.1:8000/readyz | jq .             # 期 db/redis/tos 都 ok
 cd .. && npm run typecheck                              # 期无输出
 ```
 
@@ -248,13 +250,81 @@ celery -A app.workers.celery_app:celery_app worker -B -P solo --loglevel=info
 
 ---
 
-## 7. Phase 6 预览 — 限流 + 重试 + 监控
+## 7. Phase 6 实装一览 — 重试 + 限流 + 健康检查 + Sentry(已 commit)
 
-- 每租户 token bucket(Redis-backed)限流 Celery 投递 + Ark 调用
-- `attempt` 列改 indeterministic exponential backoff,可重试错误自动 re-enqueue
-- 大文件 presigned PUT 直传 TOS(目前是 server 中转;200MB 视频会吃 200MB RSS)
-- 监控:Prometheus exporter + Sentry(任务失败、镜像 give-up、URL 刷新延迟)
-- API /healthz 加 deps check(DB / Redis / TOS)
+### 数据流
+- **Ark 提交重试**:`ark_submit_and_poll` 区分 ArkError.is_transient(5xx/429)
+  和 httpx 网络错误为可重试;permanent 4xx / RuntimeError(缺 Ark Key)直接
+  FAILED。可重试时 `task.attempt += 1`,`self.retry(countdown=...)`,full-jitter
+  exponential backoff(base 30s,2x,cap 600s)。出 `SUBMIT_MAX_ATTEMPTS=5` 后
+  也走 FAILED。轮询期 transient 已被 `poll_until_done` 内部消化,不暴露。
+- **镜像重试**:`_claim_mirror_row` 的冷却闸从固定 5min 改成
+  `_mirror_cooldown_for(attempt)`(60s base,2x,cap 1h)。SQL 候选用最小冷却
+  过滤,精确门槛交给 `_claim_mirror_row` 跑。
+- **每租户限流**:`POST /v1/tasks` 调 `consume_ark_submit_quota(tenant_id)` 走
+  Redis fixed-window(`ark_submit_quota:{tid}:{epoch_hour}`,INCR + EXPIRE),
+  默认 `ARK_SUBMIT_RATE_LIMIT_PER_HOUR=100`。所有响应都带
+  `X-RateLimit-Limit`/`Remaining`/`Reset`;超额返回 429 + `Retry-After`,
+  且计数器仍然递增(防 spammer 利用 INCR 漂移窗口)。
+- **健康检查**:`GET /healthz` 保留为廉价 liveness(只回 ok,无外依赖);新增
+  `GET /readyz` 并行 ping DB/Redis/TOS HeadBucket,任一挂掉返 503 + 失败原因。
+  k8s readinessProbe 用 readyz,liveness 用 healthz。
+- **Sentry**:`app/observability/sentry.py::init_sentry(settings, integration=...)`
+  在 FastAPI(`main.py`)和 Celery(`celery_app.py::_make_celery`)入口幂等初始化;
+  `SENTRY_DSN` 空时 no-op;tracing/profiling 关到 0.0,只要 exception capture +
+  breadcrumbs。
+
+### Server side(`server/app/`)
+**新增**:
+- `storage/quota.py` — `consume_ark_submit_quota(tenant_id, *, limit=None,
+  client=None)` 返回 `QuotaResult(allowed, used, limit, remaining,
+  reset_in_seconds)`;`limit`/`client` 参数注入便于单测。
+- `observability/sentry.py` — `init_sentry(settings, *, integration: 'fastapi'|'celery')`,
+  幂等(模块级 `_initialised`),空 DSN 直接 return。
+- `tests/test_quota.py` — 5 个单测:首次允许、超额仍然递增、租户隔离、跨小时新桶、reset
+  倒计时。
+- `tests/test_workers_backoff.py` — 6 个单测:mirror 倍增/封顶/0-attempt 兜底、
+  submit full-jitter 上下界、submit 大 attempt 的 cap。
+
+**修改**:
+- `config.py` — 加 `ark_submit_rate_limit_per_hour=100`、`sentry_dsn=""`、
+  `sentry_env="dev"`。
+- `pyproject.toml` — 加 `sentry-sdk[fastapi,celery]>=2.18`(实际 2.58 装上了)。
+- `main.py` — 启动时调 `init_sentry(...)`;新增 `_check_db/_check_redis/_check_tos`
+  + `GET /readyz`(JSONResponse,503 on degraded)。
+- `routes/tasks.py::submit_task` — 注入 `Response`,提前调 `consume_ark_submit_quota`,
+  未通过抛 429 + `Retry-After`,通过则在响应头写 RateLimit-* 三连。
+- `workers/tasks.py` — 加常量 `SUBMIT_MAX_ATTEMPTS=5`、
+  `SUBMIT_BASE_BACKOFF_SECONDS=30`、`SUBMIT_MAX_BACKOFF_SECONDS=600`、
+  `MIRROR_BASE_COOLDOWN_SECONDS=60`、`MIRROR_MAX_COOLDOWN_SECONDS=3600`;
+  helper `_submit_backoff_for(attempt)` / `_mirror_cooldown_for(attempt)`;
+  `ark_submit_and_poll` 装饰器改 `max_retries=SUBMIT_MAX_ATTEMPTS`,submit 阶段两个
+  except 都加上 transient 分支 + `self.retry(...)`;`_claim_mirror_row` 用
+  `_mirror_cooldown_for(task.mirror_attempt)`;`mirror_retry_sweep` SQL 用最小冷却。
+- `workers/celery_app.py` — `_make_celery` 头上调 `init_sentry(s, integration='celery')`。
+
+### 与原计划的偏离
+- 原计划的 "rate limit Celery 投递 + Ark 调用" 实际只在 HTTP 层做。重试不算新提交,
+  比 Celery 层简单且效果一样(Ark 限额是按 API 调用算)。
+- 原计划的 "Prometheus exporter" 推到 Phase 7,要等 VKE 上线后 dashboard 才有
+  意义。Sentry 已经覆盖 exception capture。
+- 原计划的 "presigned PUT 直传 TOS" 推到 Phase 6b,需要先解决 TOS bucket CORS
+  + STS 临时密钥范围,工作量另起一级。
+
+### 端到端 smoke(本次会话已跑)
+1. `GET /healthz` → 200 `{status:ok}` ✅
+2. `GET /readyz` → 200 `{db:{ok:true}, redis:{ok:true}, tos:{ok:true}, status:ok}` ✅
+3. 注册新租户 → `POST /v1/tasks` 连发 102 次:1-100 全 202 + `X-RateLimit-Remaining`
+   从 99 递减到 0;101 拿 429 + `Retry-After: 931`(约 15min 至下个整点) ✅
+4. 100 个失败任务都因 "tenant has no Ark API key configured" 永久 FAILED,
+   `attempt=0`(RuntimeError 不在 transient 分支,符合预期) ✅
+5. `init_sentry()` 空 DSN 直接 no-op ✅
+
+### 待 Phase 6b/7 处理
+- 透传 X-RateLimit-* 到 Electron renderer,UI 显示 "本小时还剩 N 次提交"。
+- presigned PUT(需要 TOS bucket CORS + STS 临时密钥)。
+- Prometheus exporter(等 VKE/Grafana 上线)。
+- /readyz 503 路径 smoke(需要主动断 docker container,留给 Phase 7)。
 
 ---
 
@@ -290,4 +360,4 @@ docker compose -f docker-compose.dev.yml down
 
 ## 10. 下一会话开场白模板
 
-> 继续 SeedLandV。Phase 0-5 已完成,镜像 + 签名 URL 端到端 smoke 通过,代码全 commit 在 `init` 分支。先读 `/Applications/SeedLandV/SeedLandV/HANDOFF.md` 拿状态,按 §2 起服务(uvicorn 没 --reload,celery 加 -B 启 beat —— 改 server 代码必须 pkill + 重启),跑 §4 验证一下没坏,然后开 §7 Phase 6(限流 + 重试 + 监控)。
+> 继续 SeedLandV。Phase 0-6 已完成,重试 + 限流 + Sentry + /readyz 端到端 smoke 通过,代码全 commit 在 `init` 分支。先读 `/Applications/SeedLandV/SeedLandV/HANDOFF.md` 拿状态,按 §2 起服务(uvicorn 没 --reload,celery 加 -B 启 beat —— 改 server 代码必须 pkill + 重启),跑 §4 验证一下没坏(`curl /readyz` 三 dep ok),然后开 Phase 6b(TOS presigned PUT 直传 + CORS)或 Phase 7(Prometheus + Helm/VKE)。
