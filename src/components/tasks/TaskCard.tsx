@@ -4,6 +4,7 @@ import {
   CheckCircle2,
   ChevronDown,
   Download,
+  Image as ImageIcon,
   Loader2,
   Play,
   X,
@@ -67,6 +68,13 @@ export default function TaskCard({
   const onDownload = async () => {
     if (!task.videoUrl) return
     await window.seedland.downloadVideo(task.videoUrl, `seedland-${task.localId}.mp4`)
+  }
+  const onDownloadLastFrame = async () => {
+    if (!task.lastFrameUrl) return
+    await window.seedland.downloadVideo(
+      task.lastFrameUrl,
+      `seedland-${task.localId}-last-frame.png`
+    )
   }
 
   return (
@@ -141,16 +149,23 @@ export default function TaskCard({
         <div className="mt-3 space-y-2">
           <UsageLine task={task} />
           <div className="relative overflow-hidden rounded-lg border border-[rgba(0,229,255,0.15)]">
-            {task.lastFrameUrl ? (
-              <img src={task.lastFrameUrl} className="h-32 w-full object-cover" alt="" />
-            ) : (
-              <video src={task.videoUrl} className="h-32 w-full object-cover" muted />
-            )}
+            <video
+              src={task.videoUrl}
+              poster={task.lastFrameUrl}
+              className="h-32 w-full object-cover"
+              muted
+              preload={task.lastFrameUrl ? 'none' : 'metadata'}
+            />
             <div className="absolute inset-0 flex items-center justify-center bg-gradient-to-b from-transparent via-transparent to-black/50">
               <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[rgba(0,229,255,0.2)] backdrop-blur-sm border border-neon-cyan/40">
                 <Play className="h-4 w-4 text-neon-cyan" />
               </div>
             </div>
+            {task.lastFrameUrl && (
+              <span className="absolute left-1.5 top-1.5 rounded bg-black/55 px-1.5 py-0.5 text-[9px] font-mono uppercase tracking-wider text-neon-cyan/90">
+                尾帧
+              </span>
+            )}
           </div>
           <div className="flex gap-1.5">
             <button
@@ -171,8 +186,21 @@ export default function TaskCard({
               className="btn-ghost flex-1 !px-2 !py-1.5 !text-[11px]"
             >
               <Download className="h-3 w-3" />
-              下载
+              视频
             </button>
+            {task.lastFrameUrl && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onDownloadLastFrame()
+                }}
+                className="btn-ghost !px-2 !py-1.5 !text-[11px]"
+                title="下载尾帧 PNG"
+              >
+                <ImageIcon className="h-3 w-3" />
+                尾帧
+              </button>
+            )}
           </div>
         </div>
       )}

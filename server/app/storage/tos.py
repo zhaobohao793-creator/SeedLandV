@@ -47,6 +47,13 @@ def build_video_key(task_uuid: UUID | str) -> str:
     return f"seedlandv/videos/{now:%Y/%m/%d}/{task_uuid}/video.mp4"
 
 
+def build_last_frame_key(task_uuid: UUID | str) -> str:
+    """Mirrored last-frame thumbnail key, sibling of the video key. PNG, since
+    Ark always serves last frame as `..._last-frame.png`."""
+    now = datetime.now(UTC)
+    return f"seedlandv/videos/{now:%Y/%m/%d}/{task_uuid}/last_frame.png"
+
+
 class TosClient:
     """Thin wrapper around tos.TosClientV2 — only the methods we use."""
 

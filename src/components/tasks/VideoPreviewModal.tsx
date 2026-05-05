@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import { Copy, Download, ExternalLink, X } from 'lucide-react'
+import { Copy, Download, ExternalLink, Image as ImageIcon, X } from 'lucide-react'
 import { motion } from 'framer-motion'
 import type { TaskRecord } from '@shared/types'
 import { estimateCost, formatCNY } from '@shared/pricing'
@@ -21,6 +21,12 @@ export default function VideoPreviewModal({
 
   const onDownload = () =>
     window.seedland.downloadVideo(task.videoUrl!, `seedland-${task.localId}.mp4`)
+  const onDownloadLastFrame = () =>
+    task.lastFrameUrl &&
+    window.seedland.downloadVideo(
+      task.lastFrameUrl,
+      `seedland-${task.localId}-last-frame.png`
+    )
   const onCopyLink = () => navigator.clipboard.writeText(task.videoUrl!)
   const onOpenExternal = () => window.seedland.openExternal(task.videoUrl!)
 
@@ -89,9 +95,15 @@ export default function VideoPreviewModal({
               <ExternalLink className="h-3.5 w-3.5" />
               浏览器打开
             </button>
+            {task.lastFrameUrl && (
+              <button onClick={onDownloadLastFrame} className="btn-ghost !text-xs">
+                <ImageIcon className="h-3.5 w-3.5" />
+                下载尾帧
+              </button>
+            )}
             <button onClick={onDownload} className="btn-primary !text-xs !py-2 !px-4">
               <Download className="h-3.5 w-3.5" />
-              下载
+              下载视频
             </button>
           </div>
         </div>

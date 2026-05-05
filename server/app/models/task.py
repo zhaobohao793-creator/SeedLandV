@@ -63,6 +63,11 @@ class Task(Base):
     tos_video_url_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    tos_last_frame_key: Mapped[str | None] = mapped_column(String, nullable=True)
+    tos_last_frame_url: Mapped[str | None] = mapped_column(String, nullable=True)
+    tos_last_frame_url_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     usage: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     error: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

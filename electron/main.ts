@@ -220,13 +220,27 @@ function registerIpc() {
   )
 
   ipcMain.handle('api:downloadVideo', async (_e, url: string, suggestedName: string) => {
+    // Filter follows suggestedName extension so the same IPC handles both the
+    // mirrored video (.mp4) and the mirrored last-frame (.png).
+    const ext = (suggestedName.split('.').pop() || 'mp4').toLowerCase()
+    const filterName = ext.toUpperCase()
     const res = await dialog.showSaveDialog({
       defaultPath: suggestedName,
-      filters: [{ name: 'MP4', extensions: ['mp4'] }]
+      filters: [{ name: filterName, extensions: [ext] }]
     })
     if (res.canceled || !res.filePath) return null
 
-    const savePath = res.filePath
+    // macOS Save Dialog appends the filter extension when the typed filename
+    // ends in a different extension (e.g. MP4 filter + name "x.png" produces
+    // "x.png.mp4"). Strip a single trailing mismatched extension and ensure
+    // the path ends with the requested ext.
+    const wanted = `.${ext}`
+    let savePath = res.filePath
+    if (!savePath.toLowerCase().endsWith(wanted)) {
+      const trailing = path.extname(savePath)
+      if (trailing) savePath = savePath.slice(0, -trailing.length)
+      if (!savePath.toLowerCase().endsWith(wanted)) savePath = `${savePath}${wanted}`
+    }
     const win = mainWindow
     if (!win) return null
 

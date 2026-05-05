@@ -77,7 +77,7 @@ def _to_task_out(task: Task, assets: list[TaskAsset]) -> TaskOut:
         assetsPreview=previews,
         status=task.status,
         videoUrl=task.tos_video_url or task.ark_video_url,
-        lastFrameUrl=task.ark_last_frame,
+        lastFrameUrl=task.tos_last_frame_url or task.ark_last_frame,
         error=task.error,  # type: ignore[arg-type]
         createdAt=_epoch_ms(task.created_at),
         updatedAt=_epoch_ms(task.updated_at),
@@ -250,7 +250,7 @@ async def delete_task(
             ],
             "status": TaskStatus.CANCELLED.value,
             "videoUrl": task.tos_video_url or task.ark_video_url,
-            "lastFrameUrl": task.ark_last_frame,
+            "lastFrameUrl": task.tos_last_frame_url or task.ark_last_frame,
             "usage": task.usage,
             "error": task.error,
             "createdAt": _epoch_ms(task.created_at),

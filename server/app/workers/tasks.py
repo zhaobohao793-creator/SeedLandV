@@ -133,7 +133,7 @@ def _publish_snapshot(session: Session, task: Task) -> None:
         ],
         "status": task.status.value,
         "videoUrl": task.tos_video_url or task.ark_video_url,
-        "lastFrameUrl": task.ark_last_frame,
+        "lastFrameUrl": task.tos_last_frame_url or task.ark_last_frame,
         "usage": task.usage,
         "error": task.error,
         "createdAt": int(task.created_at.timestamp() * 1000) if task.created_at else 0,
@@ -410,6 +410,7 @@ def tos_mirror_video(self, task_id: int) -> str:  # noqa: ANN001
     Phase 3 (short txn): record success or rewind status to SUCCEEDED for retry.
     """
     src_url: str | None = None
+    src_last_frame: str | None = None
     task_uuid = None
     tenant_id = None
     with SyncSessionLocal() as session:
@@ -424,12 +425,14 @@ def tos_mirror_video(self, task_id: int) -> str:  # noqa: ANN001
             return "skip"
         _publish_snapshot(session, task)
         src_url = task.ark_video_url
+        src_last_frame = task.ark_last_frame
         task_uuid = task.uuid
         tenant_id = task.tenant_id
 
     # --- network phase, no DB lock held ---
     from app.storage.tos import (
         SEVEN_DAYS_SECONDS,
+        build_last_frame_key,
         build_video_key,
         get_tos_client,
         mirror_url_to_tos,
@@ -469,6 +472,28 @@ def tos_mirror_video(self, task_id: int) -> str:  # noqa: ANN001
             _publish_snapshot(session, t)
         return "failed"
 
+    # Best-effort last-frame mirror — Ark only serves the still for ~hours, so
+    # we grab it inside the same network phase as the video. A failure here is
+    # non-fatal: the task is still COMPLETED with a usable video; the renderer
+    # falls back to a video poster instead of a still image.
+    last_frame_key: str | None = None
+    last_frame_signed_url: str | None = None
+    if src_last_frame:
+        candidate_key = build_last_frame_key(task_uuid)
+        try:
+            mirror_url_to_tos(
+                client=tos_client,
+                src_url=src_last_frame,
+                dest_key=candidate_key,
+                content_type="image/png",
+            )
+            last_frame_key = candidate_key
+            last_frame_signed_url = tos_client.generate_presigned_get_url(candidate_key)
+        except Exception as e:
+            logger.warning(
+                "tos.mirror_last_frame failed task_id=%s: %s", task_id, e
+            )
+
     signed_at = datetime.now(UTC)
     expires_at = signed_at + timedelta(seconds=SEVEN_DAYS_SECONDS)
     with SyncSessionLocal() as session:
@@ -478,6 +503,10 @@ def tos_mirror_video(self, task_id: int) -> str:  # noqa: ANN001
         t.tos_video_key = dest_key
         t.tos_video_url = signed_url
         t.tos_video_url_expires_at = expires_at
+        if last_frame_key:
+            t.tos_last_frame_key = last_frame_key
+            t.tos_last_frame_url = last_frame_signed_url
+            t.tos_last_frame_url_expires_at = expires_at
         t.mirror_error = None
         _update_status(
             session,
@@ -573,6 +602,11 @@ def signed_url_refresh(limit: int = 500) -> dict[str, int]:
         for t in rows:
             t.tos_video_url = tos_client.generate_presigned_get_url(t.tos_video_key)
             t.tos_video_url_expires_at = new_expiry
+            if t.tos_last_frame_key:
+                t.tos_last_frame_url = tos_client.generate_presigned_get_url(
+                    t.tos_last_frame_key
+                )
+                t.tos_last_frame_url_expires_at = new_expiry
             refreshed += 1
         session.commit()
         for t in rows:
