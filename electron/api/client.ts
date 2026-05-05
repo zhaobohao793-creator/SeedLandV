@@ -2,7 +2,15 @@
  * Backend task/tenant API. Translates between renderer's TaskRecord shape
  * and server's TaskOut, and auto-retries once on 401 (refresh).
  */
-import type { SubmitTaskInput, TaskRecord, TaskStatus, AssetSource } from '@shared/types'
+import type {
+  AssetSource,
+  CreateEmployeeInput,
+  EmployeeRecord,
+  SubmitTaskInput,
+  TaskRecord,
+  TaskStatus,
+  UpdateEmployeeInput
+} from '@shared/types'
 import type { Auth } from './auth'
 import type { Http } from './http'
 import { AssetUploader } from './upload'
@@ -12,6 +20,8 @@ interface ServerTaskOut {
   server_id: string
   id: string | null
   localId: string
+  orderId: string
+  orderSeq: number
   mode: TaskRecord['mode']
   prompt: string
   params: TaskRecord['params']
@@ -25,11 +35,23 @@ interface ServerTaskOut {
   usage?: TaskRecord['usage'] | null
 }
 
+interface ServerEmployeeOut {
+  id: string
+  tenant_id: string
+  employee_id: string
+  display_name: string | null
+  email: string | null
+  is_admin: boolean
+  is_active: boolean
+}
+
 function fromServer(t: ServerTaskOut): TaskRecord {
   return {
     serverId: t.server_id,
     id: t.id ?? '',
     localId: t.localId,
+    orderId: t.orderId,
+    orderSeq: t.orderSeq,
     mode: t.mode,
     prompt: t.prompt,
     params: t.params,
@@ -43,6 +65,18 @@ function fromServer(t: ServerTaskOut): TaskRecord {
     createdAt: t.createdAt,
     updatedAt: t.updatedAt,
     usage: t.usage ?? undefined
+  }
+}
+
+function employeeFromServer(e: ServerEmployeeOut): EmployeeRecord {
+  return {
+    id: e.id,
+    tenantId: e.tenant_id,
+    employeeId: e.employee_id,
+    displayName: e.display_name,
+    email: e.email,
+    isAdmin: e.is_admin,
+    isActive: e.is_active
   }
 }
 
@@ -73,8 +107,12 @@ export class ApiClient {
     return out.map(fromServer)
   }
 
-  async submitTask(input: SubmitTaskInput): Promise<{ localId: string }> {
+  async submitTask(
+    input: SubmitTaskInput
+  ): Promise<{ localId: string; orderId: string; orderSeq: number }> {
     validateByMode(input.mode, input.assets)
+    const orderId = input.orderId.trim()
+    if (!orderId) throw new Error('订单号不能为空')
 
     const localId = `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 
@@ -90,19 +128,68 @@ export class ApiClient {
       })
     )
 
-    await this.withRefresh(() =>
-      this.http.post<{ server_id: string; localId: string; status: TaskStatus }>(
-        '/v1/tasks',
-        {
-          localId,
-          mode: input.mode,
-          prompt: input.prompt,
-          assets,
-          params: input.params
-        }
-      )
+    const res = await this.withRefresh(() =>
+      this.http.post<{
+        server_id: string
+        localId: string
+        orderId: string
+        orderSeq: number
+        status: TaskStatus
+      }>('/v1/tasks', {
+        localId,
+        orderId,
+        mode: input.mode,
+        prompt: input.prompt,
+        assets,
+        params: input.params
+      })
     )
-    return { localId }
+    return { localId, orderId: res.orderId, orderSeq: res.orderSeq }
+  }
+
+  async listEmployees(): Promise<EmployeeRecord[]> {
+    const out = await this.withRefresh(() =>
+      this.http.get<ServerEmployeeOut[]>('/v1/admin/employees')
+    )
+    return out.map(employeeFromServer)
+  }
+
+  async createEmployee(input: CreateEmployeeInput): Promise<EmployeeRecord> {
+    const out = await this.withRefresh(() =>
+      this.http.post<ServerEmployeeOut>('/v1/admin/employees', {
+        employee_id: input.employeeId,
+        password: input.password,
+        display_name: input.displayName,
+        email: input.email,
+        is_admin: input.isAdmin ?? false
+      })
+    )
+    return employeeFromServer(out)
+  }
+
+  async updateEmployee(
+    userId: string,
+    patch: UpdateEmployeeInput
+  ): Promise<EmployeeRecord> {
+    const out = await this.withRefresh(() =>
+      this.http.request<ServerEmployeeOut>(`/v1/admin/employees/${userId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          display_name: patch.displayName,
+          password: patch.password,
+          is_admin: patch.isAdmin,
+          is_active: patch.isActive
+        })
+      })
+    )
+    return employeeFromServer(out)
+  }
+
+  async deactivateEmployee(userId: string): Promise<EmployeeRecord> {
+    const out = await this.withRefresh(() =>
+      this.http.delete<ServerEmployeeOut>(`/v1/admin/employees/${userId}`)
+    )
+    return employeeFromServer(out)
   }
 
   async cancelTask(serverId: string): Promise<void> {

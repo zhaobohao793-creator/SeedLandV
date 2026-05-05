@@ -65,15 +65,19 @@ export default function TaskCard({
     if (task.serverId) await window.seedland.removeTask(task.serverId)
     removeFromStore(task.localId)
   }
+  // Workshop-delivery naming: file goes to the customer/order-keeper as
+  // {订单号}.mp4. Same order_id submitted multiple times gets -2, -3 suffix.
+  const orderSuffix = task.orderSeq > 1 ? `-${task.orderSeq}` : ''
+  const orderBase = `${task.orderId}${orderSuffix}`
   const onDownload = async () => {
     if (!task.videoUrl) return
-    await window.seedland.downloadVideo(task.videoUrl, `seedland-${task.localId}.mp4`)
+    await window.seedland.downloadVideo(task.videoUrl, `${orderBase}.mp4`)
   }
   const onDownloadLastFrame = async () => {
     if (!task.lastFrameUrl) return
     await window.seedland.downloadVideo(
       task.lastFrameUrl,
-      `seedland-${task.localId}-last-frame.png`
+      `${orderBase}-last-frame.png`
     )
   }
 
@@ -90,6 +94,17 @@ export default function TaskCard({
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <StatusDot status={task.status} />
+            <span
+              className="truncate font-mono text-xs font-semibold text-neon-cyan"
+              title={`订单号 ${task.orderId}`}
+            >
+              #{task.orderId}
+              {task.orderSeq > 1 && (
+                <span className="ml-0.5 text-text-dim">-{task.orderSeq}</span>
+              )}
+            </span>
+          </div>
+          <div className="mt-0.5 flex items-center gap-2">
             <span className="text-[10px] font-mono uppercase tracking-wider text-text-muted">
               {MODE_LABEL[task.mode]}
             </span>

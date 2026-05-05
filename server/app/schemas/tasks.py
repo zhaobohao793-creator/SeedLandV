@@ -49,6 +49,7 @@ AssetSource = Annotated[
 
 class SubmitTaskRequest(BaseModel):
     localId: str = Field(min_length=1, max_length=64)
+    orderId: str = Field(min_length=1, max_length=64)
     mode: GenerationMode
     prompt: str
     assets: list[AssetSource] = Field(default_factory=list)
@@ -77,6 +78,8 @@ class TaskOut(BaseModel):
     server_id: UUID = Field(alias="server_id")
     id: str | None = None  # ark_task_id once known, mirrors renderer `task.id`
     localId: str
+    orderId: str
+    orderSeq: int
     mode: GenerationMode
     prompt: str
     params: GenerationParams
@@ -95,4 +98,6 @@ class TaskOut(BaseModel):
 class SubmitTaskResponse(BaseModel):
     server_id: UUID
     localId: str
+    orderId: str
+    orderSeq: int
     status: TaskStatus

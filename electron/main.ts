@@ -3,7 +3,13 @@ import path from 'node:path'
 import fs from 'node:fs'
 import dotenv from 'dotenv'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
-import type { ApiStatus, AssetKind, SubmitTaskInput } from '@shared/types'
+import type {
+  ApiStatus,
+  AssetKind,
+  CreateEmployeeInput,
+  SubmitTaskInput,
+  UpdateEmployeeInput
+} from '@shared/types'
 import { Http } from './api/http'
 import { Auth, type AuthState } from './api/auth'
 import { ApiClient } from './api/client'
@@ -107,11 +113,26 @@ function fileSize(p: string): number {
 function registerIpc() {
   ipcMain.handle('auth:state', (): AuthState => auth.state())
 
+  ipcMain.handle('auth:bootstrapStatus', async () => {
+    try {
+      return await auth.getBootstrapStatus()
+    } catch (err) {
+      // If we can't reach the API, assume initialized so the renderer at
+      // least shows the login form rather than a misleading bootstrap form.
+      console.warn('[auth:bootstrapStatus]', (err as Error).message)
+      return { initialized: true }
+    }
+  })
+
   ipcMain.handle(
     'auth:login',
-    async (_e, email: string, password: string): Promise<AuthState | { error: string }> => {
+    async (
+      _e,
+      employeeId: string,
+      password: string
+    ): Promise<AuthState | { error: string }> => {
       try {
-        const st = await auth.login(email, password)
+        const st = await auth.login(employeeId, password)
         socket.rebind()
         return st
       } catch (err) {
@@ -121,15 +142,21 @@ function registerIpc() {
   )
 
   ipcMain.handle(
-    'auth:register',
+    'auth:bootstrap',
     async (
       _e,
-      email: string,
+      workshopName: string,
+      employeeId: string,
       password: string,
-      tenantName?: string
+      displayName?: string
     ): Promise<AuthState | { error: string }> => {
       try {
-        const st = await auth.register(email, password, tenantName)
+        const st = await auth.bootstrapInitial(
+          workshopName,
+          employeeId,
+          password,
+          displayName
+        )
         socket.rebind()
         return st
       } catch (err) {
@@ -141,6 +168,44 @@ function registerIpc() {
   ipcMain.handle('auth:logout', async () => {
     await auth.logout()
     socket.rebind()
+  })
+
+  ipcMain.handle('admin:listEmployees', async () => {
+    try {
+      return await api.listEmployees()
+    } catch (err) {
+      return { error: (err as Error).message }
+    }
+  })
+
+  ipcMain.handle(
+    'admin:createEmployee',
+    async (_e, input: CreateEmployeeInput) => {
+      try {
+        return await api.createEmployee(input)
+      } catch (err) {
+        return { error: (err as Error).message }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    'admin:updateEmployee',
+    async (_e, userId: string, patch: UpdateEmployeeInput) => {
+      try {
+        return await api.updateEmployee(userId, patch)
+      } catch (err) {
+        return { error: (err as Error).message }
+      }
+    }
+  )
+
+  ipcMain.handle('admin:deactivateEmployee', async (_e, userId: string) => {
+    try {
+      return await api.deactivateEmployee(userId)
+    } catch (err) {
+      return { error: (err as Error).message }
+    }
   })
 
   ipcMain.handle('tenant:setArkKey', async (_e, key: string): Promise<{ ok: true } | { error: string }> => {

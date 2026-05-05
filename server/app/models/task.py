@@ -49,6 +49,8 @@ class Task(Base):
         nullable=True,
     )
     local_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    order_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    order_seq: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     ark_task_id: Mapped[str | None] = mapped_column(String(128), nullable=True, unique=True)
     mode: Mapped[str] = mapped_column(String(32), nullable=False)
     prompt: Mapped[str] = mapped_column(String, nullable=False)
@@ -97,4 +99,5 @@ class Task(Base):
             "created_at",
         ),
         Index("ix_tasks_tenant_local_id", "tenant_id", "local_id"),
+        Index("ix_tasks_tenant_order_id", "tenant_id", "order_id"),
     )

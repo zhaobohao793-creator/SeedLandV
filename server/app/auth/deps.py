@@ -25,8 +25,14 @@ async def get_current_user(
 
     user_id = UUID(claims["sub"])
     user = await session.scalar(select(User).where(User.id == user_id))
-    if user is None:
+    if user is None or not user.is_active:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "user not found")
+    return user
+
+
+async def get_current_admin(user: User = Depends(get_current_user)) -> User:
+    if not user.is_admin:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "admin only")
     return user
 
 

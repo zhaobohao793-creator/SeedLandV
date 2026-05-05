@@ -98,6 +98,7 @@ export interface GenerationParams {
 export interface SubmitTaskInput {
   mode: GenerationMode
   prompt: string
+  orderId: string
   assets: AssetSource[]
   params: GenerationParams
 }
@@ -118,6 +119,8 @@ export interface TaskRecord {
   serverId: string
   id: string
   localId: string
+  orderId: string
+  orderSeq: number
   mode: GenerationMode
   prompt: string
   params: GenerationParams
@@ -137,8 +140,39 @@ export interface ApiStatus {
 
 export interface AuthState {
   loggedIn: boolean
-  email?: string
+  employeeId?: string
+  displayName?: string
+  isAdmin?: boolean
   tenantId?: string
+}
+
+export interface EmployeeRecord {
+  id: string
+  tenantId: string
+  employeeId: string
+  displayName: string | null
+  email: string | null
+  isAdmin: boolean
+  isActive: boolean
+}
+
+export interface CreateEmployeeInput {
+  employeeId: string
+  password: string
+  displayName?: string
+  email?: string
+  isAdmin?: boolean
+}
+
+export interface UpdateEmployeeInput {
+  displayName?: string
+  password?: string
+  isAdmin?: boolean
+  isActive?: boolean
+}
+
+export interface BootstrapStatus {
+  initialized: boolean
 }
 
 declare global {
@@ -146,13 +180,30 @@ declare global {
     seedland: {
       // Auth
       getAuthState: () => Promise<AuthState>
-      login: (email: string, password: string) => Promise<AuthState | { error: string }>
-      register: (
-        email: string,
+      getBootstrapStatus: () => Promise<BootstrapStatus>
+      bootstrap: (
+        workshopName: string,
+        employeeId: string,
         password: string,
-        tenantName?: string
+        displayName?: string
+      ) => Promise<AuthState | { error: string }>
+      login: (
+        employeeId: string,
+        password: string
       ) => Promise<AuthState | { error: string }>
       logout: () => Promise<void>
+      // Admin: employee management (admin-only on the server side)
+      listEmployees: () => Promise<EmployeeRecord[] | { error: string }>
+      createEmployee: (
+        input: CreateEmployeeInput
+      ) => Promise<EmployeeRecord | { error: string }>
+      updateEmployee: (
+        userId: string,
+        patch: UpdateEmployeeInput
+      ) => Promise<EmployeeRecord | { error: string }>
+      deactivateEmployee: (
+        userId: string
+      ) => Promise<EmployeeRecord | { error: string }>
       // Tenant Ark Key
       setArkKey: (key: string) => Promise<{ ok: true } | { error: string }>
       getArkKeyStatus: () => Promise<{ hasKey: boolean }>
@@ -160,7 +211,7 @@ declare global {
       getApiStatus: () => Promise<ApiStatus>
       submitTask: (
         input: SubmitTaskInput
-      ) => Promise<{ localId: string } | { error: string }>
+      ) => Promise<{ localId: string; orderId: string; orderSeq: number } | { error: string }>
       cancelTask: (serverId: string) => Promise<void>
       removeTask: (serverId: string) => Promise<void>
       listTasks: () => Promise<TaskRecord[]>

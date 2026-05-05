@@ -124,6 +124,8 @@ def _publish_snapshot(session: Session, task: Task) -> None:
         "server_id": str(task.uuid),
         "id": task.ark_task_id,
         "localId": task.local_id,
+        "orderId": task.order_id,
+        "orderSeq": task.order_seq,
         "mode": task.mode,
         "prompt": task.prompt,
         "params": task.params,

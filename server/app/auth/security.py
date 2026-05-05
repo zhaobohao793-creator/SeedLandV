@@ -29,10 +29,21 @@ def _encode(claims: dict[str, Any], ttl_seconds: int) -> str:
     return jwt.encode(payload, s.jwt_secret, algorithm=s.jwt_algorithm)
 
 
-def encode_access_token(user_id: UUID, tenant_id: UUID) -> str:
+def encode_access_token(
+    user_id: UUID,
+    tenant_id: UUID,
+    employee_id: str,
+    is_admin: bool,
+) -> str:
     s = get_settings()
     return _encode(
-        {"sub": str(user_id), "tid": str(tenant_id), "typ": "access"},
+        {
+            "sub": str(user_id),
+            "tid": str(tenant_id),
+            "eid": employee_id,
+            "adm": bool(is_admin),
+            "typ": "access",
+        },
         s.jwt_access_ttl_seconds,
     )
 

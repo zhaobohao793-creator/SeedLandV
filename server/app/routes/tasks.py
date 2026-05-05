@@ -4,7 +4,7 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.deps import get_current_user
@@ -71,6 +71,8 @@ def _to_task_out(task: Task, assets: list[TaskAsset]) -> TaskOut:
         server_id=task.uuid,
         id=task.ark_task_id,
         localId=task.local_id,
+        orderId=task.order_id,
+        orderSeq=task.order_seq,
         mode=task.mode,  # type: ignore[arg-type]
         prompt=task.prompt,
         params=task.params,  # type: ignore[arg-type]
@@ -112,10 +114,24 @@ async def submit_task(
             },
         )
 
+    # Same order_id can be submitted multiple times (retries, multi-shot).
+    # Compute the next sequence number so the renderer can name files
+    # `{order_id}-{seq}.mp4` without collisions. Race-prone under concurrent
+    # submits for the exact same order_id, but that's a minor cosmetic issue
+    # (two videos getting the same suffix) at workshop scale.
+    existing_seq = await session.scalar(
+        select(func.coalesce(func.max(Task.order_seq), 0)).where(
+            Task.tenant_id == user.tenant_id, Task.order_id == req.orderId
+        )
+    )
+    next_seq = int(existing_seq or 0) + 1
+
     task = Task(
         tenant_id=user.tenant_id,
         user_id=user.id,
         local_id=req.localId,
+        order_id=req.orderId,
+        order_seq=next_seq,
         mode=req.mode.value,
         prompt=req.prompt,
         params=_params_to_jsonb(req.params),
@@ -162,7 +178,11 @@ async def submit_task(
     ark_submit_and_poll.delay(task.id)
 
     return SubmitTaskResponse(
-        server_id=task.uuid, localId=task.local_id, status=task.status
+        server_id=task.uuid,
+        localId=task.local_id,
+        orderId=task.order_id,
+        orderSeq=task.order_seq,
+        status=task.status,
     )
 
 
@@ -241,6 +261,8 @@ async def delete_task(
             "server_id": str(task.uuid),
             "id": task.ark_task_id,
             "localId": task.local_id,
+            "orderId": task.order_id,
+            "orderSeq": task.order_seq,
             "mode": task.mode,
             "prompt": task.prompt,
             "params": task.params,

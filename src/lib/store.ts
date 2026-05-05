@@ -24,6 +24,7 @@ export const DEFAULT_PARAMS: GenerationParams = {
 
 interface FormState {
   prompt: string
+  orderId: string
   assets: AssetSource[]
   params: GenerationParams
 }
@@ -40,6 +41,7 @@ interface AppState {
   setArkKeyPromptOpen: (open: boolean) => void
   setMode: (m: GenerationMode) => void
   setPrompt: (mode: GenerationMode, v: string) => void
+  setOrderId: (mode: GenerationMode, v: string) => void
   setAssets: (mode: GenerationMode, a: AssetSource[]) => void
   addAsset: (mode: GenerationMode, a: AssetSource) => void
   removeAsset: (mode: GenerationMode, index: number) => void
@@ -56,6 +58,7 @@ interface AppState {
 
 const emptyForm = (): FormState => ({
   prompt: '',
+  orderId: '',
   assets: [],
   params: { ...DEFAULT_PARAMS }
 })
@@ -79,6 +82,10 @@ export const useAppStore = create<AppState>((set) => ({
   setPrompt: (mode, v) =>
     set((st) => ({
       forms: { ...st.forms, [mode]: { ...st.forms[mode], prompt: v } }
+    })),
+  setOrderId: (mode, v) =>
+    set((st) => ({
+      forms: { ...st.forms, [mode]: { ...st.forms[mode], orderId: v } }
     })),
   setAssets: (mode, a) =>
     set((st) => ({

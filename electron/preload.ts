@@ -1,17 +1,56 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import type { SubmitTaskInput, TaskRecord, AssetKind } from './shared/types'
-import type { AuthState } from './api/auth'
+import type {
+  AssetKind,
+  AuthState,
+  BootstrapStatus,
+  CreateEmployeeInput,
+  EmployeeRecord,
+  SubmitTaskInput,
+  TaskRecord,
+  UpdateEmployeeInput
+} from './shared/types'
 
 const api = {
   // Auth — main process holds tokens via safeStorage; renderer only sees state.
   getAuthState: (): Promise<AuthState> => ipcRenderer.invoke('auth:state'),
-  login: (email: string, password: string) =>
-    ipcRenderer.invoke('auth:login', email, password) as Promise<AuthState | { error: string }>,
-  register: (email: string, password: string, tenantName?: string) =>
-    ipcRenderer.invoke('auth:register', email, password, tenantName) as Promise<
+  getBootstrapStatus: (): Promise<BootstrapStatus> =>
+    ipcRenderer.invoke('auth:bootstrapStatus'),
+  login: (employeeId: string, password: string) =>
+    ipcRenderer.invoke('auth:login', employeeId, password) as Promise<
       AuthState | { error: string }
     >,
+  bootstrap: (
+    workshopName: string,
+    employeeId: string,
+    password: string,
+    displayName?: string
+  ) =>
+    ipcRenderer.invoke(
+      'auth:bootstrap',
+      workshopName,
+      employeeId,
+      password,
+      displayName
+    ) as Promise<AuthState | { error: string }>,
   logout: () => ipcRenderer.invoke('auth:logout') as Promise<void>,
+
+  // Admin — employee CRUD (server enforces is_admin)
+  listEmployees: () =>
+    ipcRenderer.invoke('admin:listEmployees') as Promise<
+      EmployeeRecord[] | { error: string }
+    >,
+  createEmployee: (input: CreateEmployeeInput) =>
+    ipcRenderer.invoke('admin:createEmployee', input) as Promise<
+      EmployeeRecord | { error: string }
+    >,
+  updateEmployee: (userId: string, patch: UpdateEmployeeInput) =>
+    ipcRenderer.invoke('admin:updateEmployee', userId, patch) as Promise<
+      EmployeeRecord | { error: string }
+    >,
+  deactivateEmployee: (userId: string) =>
+    ipcRenderer.invoke('admin:deactivateEmployee', userId) as Promise<
+      EmployeeRecord | { error: string }
+    >,
 
   // Tenant Ark Key
   setArkKey: (key: string) =>
