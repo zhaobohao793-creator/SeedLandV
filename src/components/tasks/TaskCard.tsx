@@ -31,7 +31,14 @@ export default function TaskCard({
 }) {
   const [errOpen, setErrOpen] = useState(false)
   const isActive =
-    task.status === 'submitting' || task.status === 'queued' || task.status === 'running'
+    task.status === 'submitting' ||
+    task.status === 'queued' ||
+    task.status === 'running' ||
+    task.status === 'mirroring'
+  const isSuccess =
+    task.status === 'succeeded' ||
+    task.status === 'completed' ||
+    task.status === 'completed_partial'
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
     if (!isActive) return
@@ -42,7 +49,17 @@ export default function TaskCard({
 
   const removeFromStore = useAppStore((s) => s.removeTask)
 
-  const onCancel = () => task.serverId && window.seedland.cancelTask(task.serverId)
+  const onCancel = async () => {
+    if (task.serverId) {
+      try {
+        await window.seedland.cancelTask(task.serverId)
+      } catch {
+        // network error / 404 — UI still removes the card so the user
+        // isn't stuck staring at a frozen "submitting" state
+      }
+    }
+    removeFromStore(task.localId)
+  }
   const onRemove = async () => {
     if (task.serverId) await window.seedland.removeTask(task.serverId)
     removeFromStore(task.localId)
@@ -56,10 +73,10 @@ export default function TaskCard({
     <div
       className={cn(
         'glass rounded-xl p-3.5 transition-all',
-        task.status === 'succeeded' && 'glass-hover cursor-pointer',
+        isSuccess && 'glass-hover cursor-pointer',
         task.status === 'failed' && 'border-[rgba(244,63,94,0.25)]'
       )}
-      onClick={() => task.status === 'succeeded' && onPreview()}
+      onClick={() => isSuccess && onPreview()}
     >
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0 flex-1">
@@ -120,7 +137,7 @@ export default function TaskCard({
         </div>
       ) : null}
 
-      {task.status === 'succeeded' && task.videoUrl && (
+      {isSuccess && task.videoUrl && (
         <div className="mt-3 space-y-2">
           <UsageLine task={task} />
           <div className="relative overflow-hidden rounded-lg border border-[rgba(0,229,255,0.15)]">
@@ -195,7 +212,7 @@ export default function TaskCard({
 }
 
 function StatusDot({ status }: { status: TaskStatus }) {
-  if (status === 'succeeded')
+  if (status === 'succeeded' || status === 'completed' || status === 'completed_partial')
     return <CheckCircle2 className="h-3.5 w-3.5 text-neon-teal" />
   if (status === 'failed' || status === 'expired')
     return <XCircle className="h-3.5 w-3.5 text-neon-rose" />
@@ -211,8 +228,13 @@ function statusLabel(s: TaskStatus) {
       return '排队中…'
     case 'running':
       return '生成中…'
+    case 'mirroring':
+      return '保存中…'
     case 'succeeded':
+    case 'completed':
       return '已完成'
+    case 'completed_partial':
+      return '部分完成'
     case 'failed':
       return '失败'
     case 'cancelled':

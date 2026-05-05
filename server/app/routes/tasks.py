@@ -10,7 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.deps import get_current_user
 from app.db.session import get_session
 from app.models import Task, TaskAsset, User
-from app.models.enums import TaskStatus
+from app.models.enums import TERMINAL_STATUSES, TaskStatus
+from app.realtime.publisher import publish_task_update
 from app.routes.assets import _redis as _assets_redis, asset_token_key
 from app.schemas.tasks import (
     AssetPreview,
@@ -220,6 +221,44 @@ async def delete_task(
     )
     if task is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "task not found")
+
+    # Active task → broadcast a CANCELLED snapshot so any other connected
+    # client (or the renderer that issued the cancel) sees the state change
+    # before the row disappears. The worker keeps polling Ark in the
+    # background but its writes hit a deleted row and get cleaned up by the
+    # missing-task guard inside ark_submit_and_poll.
+    #
+    # Snapshot all fields up front: once we mutate `task.status` the trigger
+    # on `updated_at` expires the column, and lazy-loading expired columns
+    # from inside an AsyncSession blows up with MissingGreenlet.
+    if task.status not in TERMINAL_STATUSES:
+        assets = (
+            await session.scalars(
+                select(TaskAsset).where(TaskAsset.task_id == task.id).order_by(TaskAsset.position)
+            )
+        ).all()
+        payload = {
+            "server_id": str(task.uuid),
+            "id": task.ark_task_id,
+            "localId": task.local_id,
+            "mode": task.mode,
+            "prompt": task.prompt,
+            "params": task.params,
+            "assetsPreview": [
+                {"kind": a.kind, "label": a.origin_url or (a.tos_key or "uploaded")}
+                for a in assets
+            ],
+            "status": TaskStatus.CANCELLED.value,
+            "videoUrl": task.tos_video_url or task.ark_video_url,
+            "lastFrameUrl": task.ark_last_frame,
+            "usage": task.usage,
+            "error": task.error,
+            "createdAt": _epoch_ms(task.created_at),
+            "updatedAt": _epoch_ms(task.updated_at),
+        }
+        tenant_id = task.tenant_id
+        publish_task_update(tenant_id, payload)
+
     await session.delete(task)
     await session.commit()
 
