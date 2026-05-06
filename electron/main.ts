@@ -1,9 +1,11 @@
-import { app, BrowserWindow, ipcMain, dialog, shell, session } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, shell, session, protocol } from 'electron'
 import path from 'node:path'
 import fs from 'node:fs'
+import { Readable } from 'node:stream'
 import dotenv from 'dotenv'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import type {
+  AddLibraryInput,
   ApiStatus,
   AssetKind,
   CreateEmployeeInput,
@@ -15,6 +17,58 @@ import { Http } from './api/http'
 import { Auth, type AuthState } from './api/auth'
 import { ApiClient } from './api/client'
 import { TaskSocket } from './api/socket'
+import { LibraryStore } from './api/library'
+
+// Custom scheme so the renderer can render local-file thumbnails without
+// granting blanket file:// access. Must be registered before app is ready.
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'seedasset',
+    privileges: { secure: true, supportFetchAPI: true, stream: true, bypassCSP: false }
+  }
+])
+
+const MIME_BY_EXT: Record<string, string> = {
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  png: 'image/png',
+  webp: 'image/webp',
+  gif: 'image/gif',
+  bmp: 'image/bmp',
+  mp4: 'video/mp4',
+  mov: 'video/quicktime',
+  webm: 'video/webm',
+  mkv: 'video/x-matroska',
+  mp3: 'audio/mpeg',
+  wav: 'audio/wav',
+  m4a: 'audio/mp4',
+  aac: 'audio/aac'
+}
+
+function registerSeedAssetProtocol() {
+  protocol.handle('seedasset', async (req) => {
+    try {
+      const u = new URL(req.url)
+      if (u.host !== 'local') return new Response('bad host', { status: 400 })
+      const abs = decodeURIComponent(u.pathname.replace(/^\//, ''))
+      if (!path.isAbsolute(abs)) return new Response('not absolute', { status: 400 })
+      const stat = fs.statSync(abs)
+      if (!stat.isFile()) return new Response('not a file', { status: 404 })
+      const ext = path.extname(abs).slice(1).toLowerCase()
+      const ct = MIME_BY_EXT[ext] ?? 'application/octet-stream'
+      const stream = Readable.toWeb(fs.createReadStream(abs))
+      return new Response(stream as unknown as ReadableStream, {
+        headers: {
+          'Content-Type': ct,
+          'Content-Length': String(stat.size),
+          'Cache-Control': 'no-store'
+        }
+      })
+    } catch (err) {
+      return new Response((err as Error).message, { status: 404 })
+    }
+  })
+}
 
 function loadEnv() {
   const candidates = is.dev
@@ -36,6 +90,7 @@ let http: Http
 let auth: Auth
 let api: ApiClient
 let socket: TaskSocket
+let library: LibraryStore
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -74,6 +129,7 @@ function createWindow(): void {
 app.whenReady().then(() => {
   loadEnv()
   electronApp.setAppUserModelId('com.seedland.seedlandv')
+  registerSeedAssetProtocol()
   app.on('browser-window-created', (_, w) => optimizer.watchWindowShortcuts(w))
 
   const baseUrl = process.env.SEEDLANDV_API_URL || 'http://localhost:8000'
@@ -83,6 +139,7 @@ app.whenReady().then(() => {
   socket = new TaskSocket(baseUrl, auth, (task) => {
     mainWindow?.webContents.send('task:update', task)
   })
+  library = new LibraryStore(app.getPath('userData'))
 
   auth.bootstrap()
   registerIpc()
@@ -340,4 +397,14 @@ function registerIpc() {
       }
     }
   )
+
+  ipcMain.handle('library:list', () => library.list())
+  ipcMain.handle('library:add', (_e, input: AddLibraryInput) => library.add(input))
+  ipcMain.handle('library:remove', (_e, id: string) => {
+    library.remove(id)
+  })
+  ipcMain.handle('library:rename', (_e, id: string, name: string) => {
+    const out = library.rename(id, name)
+    return out ?? { error: '未找到该资产' }
+  })
 }

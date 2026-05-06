@@ -5,6 +5,7 @@ import type {
   AuthState,
   GenerationMode,
   GenerationParams,
+  LibraryItem,
   ModelId,
   Ratio,
   Resolution,
@@ -36,6 +37,7 @@ interface AppState {
   currentMode: GenerationMode
   tasks: TaskRecord[]
   forms: Record<GenerationMode, FormState>
+  library: LibraryItem[]
   setAuthState: (s: AuthState) => void
   setApiStatus: (s: ApiStatus) => void
   setArkKeyPromptOpen: (open: boolean) => void
@@ -54,6 +56,9 @@ interface AppState {
   mergeTask: (task: TaskRecord) => void
   removeTask: (localId: string) => void
   clearTasks: () => void
+  setLibrary: (items: LibraryItem[]) => void
+  upsertLibraryItem: (item: LibraryItem) => void
+  removeLibraryItem: (id: string) => void
 }
 
 const emptyForm = (): FormState => ({
@@ -75,6 +80,7 @@ export const useAppStore = create<AppState>((set) => ({
     'first-last-frame': emptyForm(),
     'multi-reference': emptyForm()
   },
+  library: [],
   setAuthState: (s) => set({ authState: s }),
   setApiStatus: (s) => set({ apiStatus: s }),
   setArkKeyPromptOpen: (open) => set({ arkKeyPromptOpen: open }),
@@ -160,5 +166,16 @@ export const useAppStore = create<AppState>((set) => ({
     }),
   removeTask: (localId) =>
     set((st) => ({ tasks: st.tasks.filter((t) => t.localId !== localId) })),
-  clearTasks: () => set({ tasks: [] })
+  clearTasks: () => set({ tasks: [] }),
+  setLibrary: (items) => set({ library: items }),
+  upsertLibraryItem: (item) =>
+    set((st) => {
+      const idx = st.library.findIndex((x) => x.id === item.id)
+      if (idx === -1) return { library: [item, ...st.library] }
+      const next = st.library.slice()
+      next[idx] = item
+      return { library: next }
+    }),
+  removeLibraryItem: (id) =>
+    set((st) => ({ library: st.library.filter((x) => x.id !== id) }))
 }))

@@ -29,6 +29,7 @@ export default function App() {
   const setArkKeyPromptOpen = useAppStore((s) => s.setArkKeyPromptOpen)
   const mergeTask = useAppStore((s) => s.mergeTask)
   const setTasks = useAppStore((s) => s.setTasks)
+  const setLibrary = useAppStore((s) => s.setLibrary)
 
   // Bootstrap auth state once on mount.
   useEffect(() => {
@@ -43,9 +44,10 @@ export default function App() {
       if (!s.ark.hasKey) setArkKeyPromptOpen(true)
     })
     window.seedland.listTasks().then(setTasks)
+    window.seedland.listLibrary().then(setLibrary)
     const off = window.seedland.onTaskUpdate((task) => mergeTask(task))
     return off
-  }, [authState.loggedIn, setApiStatus, setArkKeyPromptOpen, setTasks, mergeTask])
+  }, [authState.loggedIn, setApiStatus, setArkKeyPromptOpen, setTasks, mergeTask, setLibrary])
 
   if (!authState.loggedIn) return <AuthGate />
 

@@ -1,10 +1,12 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type {
+  AddLibraryInput,
   AssetKind,
   AuthState,
   BootstrapStatus,
   CreateEmployeeInput,
   EmployeeRecord,
+  LibraryItem,
   ListOrdersFilters,
   OrderRecord,
   SubmitTaskInput,
@@ -81,7 +83,18 @@ const api = {
     const listener = (_: unknown, task: TaskRecord) => cb(task)
     ipcRenderer.on('task:update', listener)
     return () => ipcRenderer.removeListener('task:update', listener)
-  }
+  },
+
+  // Asset library — persistent local store managed by the main process.
+  listLibrary: () => ipcRenderer.invoke('library:list') as Promise<LibraryItem[]>,
+  addToLibrary: (input: AddLibraryInput) =>
+    ipcRenderer.invoke('library:add', input) as Promise<LibraryItem>,
+  removeFromLibrary: (id: string) =>
+    ipcRenderer.invoke('library:remove', id) as Promise<void>,
+  renameLibraryItem: (id: string, name: string) =>
+    ipcRenderer.invoke('library:rename', id, name) as Promise<
+      LibraryItem | { error: string }
+    >
 }
 
 contextBridge.exposeInMainWorld('seedland', api)

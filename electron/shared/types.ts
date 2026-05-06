@@ -191,6 +191,31 @@ export interface ListOrdersFilters {
   offset?: number
 }
 
+export type LibraryItem =
+  | {
+      id: string
+      kind: AssetKind
+      mode: 'local'
+      path: string
+      name: string
+      sizeBytes: number
+      addedAt: number
+    }
+  | {
+      id: string
+      kind: AssetKind
+      mode: 'url'
+      url: string
+      name: string
+      addedAt: number
+    }
+
+export interface AddLibraryInput {
+  kind: AssetKind
+  source: AssetSource
+  name?: string
+}
+
 declare global {
   interface Window {
     seedland: {
@@ -244,6 +269,11 @@ declare global {
       downloadVideo: (url: string, suggestedName: string) => Promise<string | null>
       openExternal: (url: string) => Promise<void>
       onTaskUpdate: (cb: (task: TaskRecord) => void) => () => void
+      // Asset library (local persistent store)
+      listLibrary: () => Promise<LibraryItem[]>
+      addToLibrary: (input: AddLibraryInput) => Promise<LibraryItem>
+      removeFromLibrary: (id: string) => Promise<void>
+      renameLibraryItem: (id: string, name: string) => Promise<LibraryItem | { error: string }>
     }
   }
 }

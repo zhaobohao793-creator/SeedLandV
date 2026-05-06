@@ -73,6 +73,72 @@ body {
   }
 }
 
+/* Inline mention chip rendered inside the contentEditable prompt editor. */
+.mention-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0 2px;
+  padding: 2px 8px 2px 2px;
+  border-radius: 999px;
+  background: rgba(0, 229, 255, 0.08);
+  border: 1px solid rgba(0, 229, 255, 0.28);
+  color: rgb(0, 229, 255);
+  font-size: 13px;
+  line-height: 1.2;
+  vertical-align: 1px;
+  user-select: none;
+  cursor: default;
+  white-space: nowrap;
+}
+.mention-chip-stale {
+  background: rgba(244, 63, 94, 0.06);
+  border-color: rgba(244, 63, 94, 0.3);
+  color: rgba(244, 63, 94, 0.9);
+}
+.mention-chip-thumb {
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(0, 229, 255, 0.15);
+  align-items: center;
+  justify-content: center;
+  color: rgb(0, 229, 255);
+  flex-shrink: 0;
+}
+.mention-chip-thumb img,
+.mention-chip-thumb video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  pointer-events: none;
+}
+.mention-chip-thumb svg {
+  width: 11px;
+  height: 11px;
+}
+.mention-chip-label {
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
+
+/* contentEditable placeholder via data-attr */
+.chip-editor[data-empty='true']::before {
+  content: attr(data-placeholder);
+  color: rgb(89, 99, 130);
+  pointer-events: none;
+  position: absolute;
+}
+.chip-editor {
+  position: relative;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  outline: none;
+}
+
 /* Loading shimmer bar */
 .shimmer-bar {
   background: linear-gradient(90deg,

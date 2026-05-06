@@ -22,6 +22,7 @@ export default function FirstLastFrame() {
       <PromptPanel
         mode={MODE}
         placeholder="描述过渡过程，例如：花苞慢慢绽放成盛开的花朵，微距，柔光"
+        orderedLabels={['首帧', '尾帧']}
       />
       <AssetPicker
         mode={MODE}
