@@ -1,7 +1,14 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Film, Image as ImageIcon, Music } from 'lucide-react'
 import type { AssetKind } from '@shared/types'
 import { cn } from '@/lib/cn'
+import {
+  extractVideoFrame,
+  getCachedThumb,
+  loadThumb,
+  saveThumb,
+  wasExtracted
+} from '@/lib/thumbCache'
 
 interface Props {
   kind: AssetKind
@@ -36,7 +43,45 @@ export default function Thumbnail({
 }: Props) {
   const Icon = KIND_ICON[kind]
   const [errored, setErrored] = useState(false)
-  const showVisual = !!src && !errored && (kind === 'image' || kind === 'video')
+  // For videos: prefer a cached extracted frame (sync hit) over rendering the
+  // <video> element. Async hits update via useEffect.
+  const [cachedFrame, setCachedFrame] = useState<string | null>(() =>
+    src && kind === 'video' ? getCachedThumb(src) : null
+  )
+
+  useEffect(() => {
+    setErrored(false)
+    if (!src || kind !== 'video') {
+      setCachedFrame(null)
+      return
+    }
+    const sync = getCachedThumb(src)
+    if (sync) {
+      setCachedFrame(sync)
+      return
+    }
+    let alive = true
+    loadThumb(src).then((d) => {
+      if (alive && d) setCachedFrame(d)
+    })
+    return () => {
+      alive = false
+    }
+  }, [src, kind])
+
+  const showCachedVideoFrame = !!src && !errored && kind === 'video' && !!cachedFrame
+  const showLiveVideo = !!src && !errored && kind === 'video' && !cachedFrame
+  const showImage = !!src && !errored && kind === 'image'
+  const showFallback = !showCachedVideoFrame && !showLiveVideo && !showImage
+
+  const onSeeked = (e: React.SyntheticEvent<HTMLVideoElement>) => {
+    if (!src || cachedFrame || wasExtracted(src)) return
+    const frame = extractVideoFrame(e.currentTarget)
+    if (frame) {
+      saveThumb(src, frame)
+      setCachedFrame(frame)
+    }
+  }
 
   return (
     <div
@@ -46,7 +91,7 @@ export default function Thumbnail({
         className
       )}
     >
-      {showVisual && kind === 'image' && (
+      {showImage && (
         <img
           src={src}
           alt=""
@@ -56,25 +101,35 @@ export default function Thumbnail({
           className="h-full w-full object-cover"
         />
       )}
-      {showVisual && kind === 'video' && (
+      {showCachedVideoFrame && (
+        <img
+          src={cachedFrame ?? undefined}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          className="h-full w-full object-cover"
+        />
+      )}
+      {showLiveVideo && (
         <video
           src={src}
           muted
           playsInline
           preload="metadata"
+          crossOrigin="anonymous"
           onLoadedMetadata={(e) => {
-            // Nudge to frame ~0.1s so most codecs paint a poster frame.
             try {
               e.currentTarget.currentTime = 0.1
             } catch {
               /* ignore */
             }
           }}
+          onSeeked={onSeeked}
           onError={() => setErrored(true)}
           className="h-full w-full object-cover"
         />
       )}
-      {!showVisual && (
+      {showFallback && (
         <div className="flex h-full w-full items-center justify-center">
           <Icon className={iconClassName} />
         </div>

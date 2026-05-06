@@ -18,13 +18,22 @@ import { Auth, type AuthState } from './api/auth'
 import { ApiClient } from './api/client'
 import { TaskSocket } from './api/socket'
 import { LibraryStore } from './api/library'
+import { ThumbCache } from './api/thumbCache'
 
 // Custom scheme so the renderer can render local-file thumbnails without
 // granting blanket file:// access. Must be registered before app is ready.
 protocol.registerSchemesAsPrivileged([
   {
     scheme: 'seedasset',
-    privileges: { secure: true, supportFetchAPI: true, stream: true, bypassCSP: false }
+    privileges: {
+      secure: true,
+      supportFetchAPI: true,
+      stream: true,
+      bypassCSP: false,
+      // CORS-enabled so the renderer can drawImage() these into a canvas
+      // without tainting it (needed for video first-frame extraction).
+      corsEnabled: true
+    }
   }
 ])
 
@@ -61,7 +70,8 @@ function registerSeedAssetProtocol() {
         headers: {
           'Content-Type': ct,
           'Content-Length': String(stat.size),
-          'Cache-Control': 'no-store'
+          'Cache-Control': 'no-store',
+          'Access-Control-Allow-Origin': '*'
         }
       })
     } catch (err) {
@@ -91,6 +101,7 @@ let auth: Auth
 let api: ApiClient
 let socket: TaskSocket
 let library: LibraryStore
+let thumbCache: ThumbCache
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -140,6 +151,7 @@ app.whenReady().then(() => {
     mainWindow?.webContents.send('task:update', task)
   })
   library = new LibraryStore(app.getPath('userData'))
+  thumbCache = new ThumbCache(app.getPath('userData'))
 
   auth.bootstrap()
   registerIpc()
@@ -396,6 +408,11 @@ function registerIpc() {
         return { error: (err as Error).message }
       }
     }
+  )
+
+  ipcMain.handle('thumb:get', (_e, key: string) => thumbCache.get(key))
+  ipcMain.handle('thumb:put', (_e, key: string, dataUrl: string) =>
+    thumbCache.put(key, dataUrl)
   )
 
   ipcMain.handle('library:list', () => library.list())

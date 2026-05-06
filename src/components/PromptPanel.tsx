@@ -1,11 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { AtSign, Library } from 'lucide-react'
-import type {
-  AssetKind,
-  AssetSource,
-  GenerationMode,
-  LibraryItem
-} from '@shared/types'
+import type { AssetKind, AssetSource, GenerationMode, LibraryItem } from '@shared/types'
 import { useAppStore } from '@/lib/store'
 import { cn } from '@/lib/cn'
 import {
@@ -29,19 +25,17 @@ interface Props {
   orderedLabels?: string[]
 }
 
-interface MentionItem extends ChipMeta {
+interface MentionItem {
   key: string
+  label: string
   hint: string
+  kind: AssetKind
+  src?: string
   fromLibrary: boolean
   source?: AssetSource
 }
 
-export default function PromptPanel({
-  mode,
-  placeholder,
-  minRows = 4,
-  orderedLabels
-}: Props) {
+export default function PromptPanel({ mode, placeholder, minRows = 4, orderedLabels }: Props) {
   const prompt = useAppStore((s) => s.forms[mode].prompt)
   const setPrompt = useAppStore((s) => s.setPrompt)
   const assets = useAppStore((s) => s.forms[mode].assets)
@@ -55,47 +49,68 @@ export default function PromptPanel({
   const allowed = allowedKindsOf(mode)
   const supportsAssets = allowed.length > 0
 
-  // Build the list of recognised mention labels and a resolver from label →
-  // ChipMeta. Form assets win over library on label collision (the prompt is
-  // about *this* generation).
-  const { items, labels, resolve } = useMemo(() => {
-    const items: MentionItem[] = []
-    const seen = new Set<string>()
-
-    if (supportsAssets) {
-      assets.forEach((a, i) => {
-        const label = labelForAsset(assets, i, orderedLabels)
-        if (seen.has(label)) return
-        seen.add(label)
-        items.push({
-          key: `form-${i}`,
-          label,
-          kind: a.kind,
-          src: assetSrc(a),
-          hint: a.mode === 'url' ? a.url : a.name,
-          fromLibrary: false
-        })
-      })
-      library
-        .filter((x) => allowed.includes(x.kind))
-        .forEach((x) => {
-          if (seen.has(x.name)) return
-          seen.add(x.name)
-          items.push({
-            key: `lib-${x.id}`,
-            label: x.name,
-            kind: x.kind,
-            src: librarySrc(x),
-            hint: x.mode === 'url' ? x.url : '资产库',
-            fromLibrary: true,
-            source: libraryToSource(x)
-          })
-        })
+  /** Build the canonical chip meta for a label by reading current store state. */
+  const resolveMention = (label: string): ChipMeta | null => {
+    const st = useAppStore.getState()
+    const formAssets = st.forms[mode].assets
+    for (let i = 0; i < formAssets.length; i++) {
+      const lbl = labelForAsset(formAssets, i, orderedLabels)
+      if (lbl === label) {
+        const a = formAssets[i]
+        return { label, kind: a.kind, src: assetSrc(a) }
+      }
     }
+    const lib = st.library.find((x) => x.name === label && allowed.includes(x.kind))
+    if (lib) return { label, kind: lib.kind, src: librarySrc(lib) }
+    return null
+  }
 
-    const labels = items.map((i) => i.label)
-    const map = new Map(items.map((it) => [it.label, it as ChipMeta]))
-    return { items, labels, resolve: (label: string) => map.get(label) ?? null }
+  const mentionLabels = useMemo(() => {
+    const labels: string[] = []
+    assets.forEach((_, i) => labels.push(labelForAsset(assets, i, orderedLabels)))
+    library.forEach((x) => {
+      if (allowed.includes(x.kind)) labels.push(x.name)
+    })
+    return labels
+  }, [assets, library, allowed, orderedLabels])
+
+  // Register the imperative inserter so AssetPicker / library can drive us.
+  useEffect(() => {
+    return registerPromptInserter({
+      mode,
+      insertMention: (label) => {
+        const meta = resolveMention(label)
+        if (!meta) return
+        editorRef.current?.insertChip(meta)
+        editorRef.current?.focus()
+      }
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode])
+
+  // Build popover options from current form assets + library.
+  const items: MentionItem[] = useMemo(() => {
+    if (!supportsAssets) return []
+    const fromForm: MentionItem[] = assets.map((a, i) => ({
+      key: `form-${i}`,
+      label: labelForAsset(assets, i, orderedLabels),
+      hint: a.mode === 'url' ? a.url : a.name,
+      kind: a.kind,
+      src: assetSrc(a),
+      fromLibrary: false
+    }))
+    const fromLib: MentionItem[] = library
+      .filter((x) => allowed.includes(x.kind))
+      .map((x) => ({
+        key: `lib-${x.id}`,
+        label: x.name,
+        hint: x.mode === 'url' ? x.url : '资产库',
+        kind: x.kind,
+        src: librarySrc(x),
+        fromLibrary: true,
+        source: libraryToSource(x)
+      }))
+    return [...fromForm, ...fromLib]
   }, [assets, library, allowed, supportsAssets, orderedLabels])
 
   const filtered = useMemo(() => {
@@ -111,28 +126,15 @@ export default function PromptPanel({
     setHighlight((h) => Math.min(h, Math.max(0, filtered.length - 1)))
   }, [filtered.length])
 
-  // Register an imperative chip insertion API for AssetPicker / library tile
-  // clicks. Always uses the ChipEditor's insertChip path so the visual stays
-  // consistent with @-mention commits.
-  useEffect(() => {
-    return registerPromptInserter({
-      mode,
-      insertMention: (label) => {
-        const meta = resolve(label)
-        if (meta) editorRef.current?.insertChip(meta)
-        else editorRef.current?.insertChip({ label, kind: 'image' })
-      }
-    })
-  }, [mode, resolve])
-
   const commit = (item: MentionItem) => {
     if (item.fromLibrary && item.source) {
       addAsset(mode, item.source)
     }
-    editorRef.current?.commitMention(item)
+    editorRef.current?.commitMention({ label: item.label, kind: item.kind, src: item.src })
+    editorRef.current?.focus()
   }
 
-  const onSpecialKey = (e: React.KeyboardEvent<HTMLDivElement>): boolean => {
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>): boolean => {
     if (!mention || filtered.length === 0) return false
     if (e.key === 'ArrowDown') {
       setHighlight((h) => (h + 1) % filtered.length)
@@ -164,21 +166,22 @@ export default function PromptPanel({
           ref={editorRef}
           value={prompt}
           onChange={(v) => setPrompt(mode, v)}
-          resolveMention={resolve}
-          mentionLabels={labels}
-          onMentionStateChange={setMention}
-          onSpecialKeyDown={onSpecialKey}
+          resolveMention={resolveMention}
+          mentionLabels={mentionLabels}
+          onMentionStateChange={(s) => setMention(supportsAssets ? s : null)}
+          onSpecialKeyDown={handleKeyDown}
           placeholder={
             placeholder ??
             '描述你想生成的画面，例如：一只橘猫在霓虹雨夜的东京街头漫步，电影感，超写实'
           }
           minRows={minRows}
-          className="prompt-input"
+          className="input-base resize-none text-sm leading-relaxed"
         />
         {mention && filtered.length > 0 && supportsAssets && (
           <MentionPopover
             items={filtered}
             highlight={highlight}
+            anchorRect={mention.rect}
             onPick={commit}
             onHover={setHighlight}
           />
@@ -187,7 +190,8 @@ export default function PromptPanel({
       {supportsAssets && (
         <div className="mt-2 flex items-center gap-1 text-[11px] text-text-dim">
           <AtSign className="h-3 w-3" />
-          输入 <kbd className="rounded bg-[rgba(7,11,20,0.6)] px-1 font-mono">@</kbd> 引用素材或资产库
+          输入 <kbd className="rounded bg-[rgba(7,11,20,0.6)] px-1 font-mono">@</kbd>
+          引用素材或资产库 · 点击下方资产卡片也会插入
         </div>
       )}
     </section>
@@ -197,16 +201,46 @@ export default function PromptPanel({
 function MentionPopover({
   items,
   highlight,
+  anchorRect,
   onPick,
   onHover
 }: {
   items: MentionItem[]
   highlight: number
+  anchorRect: DOMRect
   onPick: (item: MentionItem) => void
   onHover: (i: number) => void
 }) {
-  return (
-    <div className="absolute left-0 right-0 top-full z-30 mt-1 max-h-64 overflow-auto rounded-lg border border-[rgba(0,229,255,0.2)] bg-[rgba(7,11,20,0.95)] shadow-card backdrop-blur-xl">
+  // Estimate width / height; the popover clamps inside the viewport.
+  const POPOVER_W = 320
+  const POPOVER_MAX_H = 256
+  const margin = 8
+  const vw = window.innerWidth
+  const vh = window.innerHeight
+
+  let left = anchorRect.left
+  if (left + POPOVER_W + margin > vw) left = vw - POPOVER_W - margin
+  if (left < margin) left = margin
+
+  // Prefer below caret; flip above when clipped.
+  const spaceBelow = vh - anchorRect.bottom - margin
+  const flip = spaceBelow < 160 && anchorRect.top > spaceBelow
+  const top = flip
+    ? Math.max(margin, anchorRect.top - POPOVER_MAX_H - 4)
+    : anchorRect.bottom + 4
+
+  return createPortal(
+    <div
+      style={{
+        position: 'fixed',
+        left,
+        top,
+        width: POPOVER_W,
+        maxHeight: POPOVER_MAX_H,
+        zIndex: 1000
+      }}
+      className="overflow-auto rounded-lg border border-[rgba(0,229,255,0.25)] bg-[rgba(7,11,20,0.97)] shadow-card backdrop-blur-xl"
+    >
       {items.map((it, i) => {
         const active = i === highlight
         return (
@@ -244,7 +278,8 @@ function MentionPopover({
           </button>
         )
       })}
-    </div>
+    </div>,
+    document.body
   )
 }
 

@@ -85,6 +85,12 @@ const api = {
     return () => ipcRenderer.removeListener('task:update', listener)
   },
 
+  // Thumbnail cache — main process owns disk storage, renderer drives extraction.
+  getThumb: (key: string) =>
+    ipcRenderer.invoke('thumb:get', key) as Promise<string | null>,
+  putThumb: (key: string, dataUrl: string) =>
+    ipcRenderer.invoke('thumb:put', key, dataUrl) as Promise<void>,
+
   // Asset library — persistent local store managed by the main process.
   listLibrary: () => ipcRenderer.invoke('library:list') as Promise<LibraryItem[]>,
   addToLibrary: (input: AddLibraryInput) =>

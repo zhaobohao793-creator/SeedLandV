@@ -269,6 +269,9 @@ declare global {
       downloadVideo: (url: string, suggestedName: string) => Promise<string | null>
       openExternal: (url: string) => Promise<void>
       onTaskUpdate: (cb: (task: TaskRecord) => void) => () => void
+      // Thumbnail cache (disk-backed, sha1-keyed, JPEG)
+      getThumb: (key: string) => Promise<string | null>
+      putThumb: (key: string, dataUrl: string) => Promise<void>
       // Asset library (local persistent store)
       listLibrary: () => Promise<LibraryItem[]>
       addToLibrary: (input: AddLibraryInput) => Promise<LibraryItem>

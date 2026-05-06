@@ -6,6 +6,13 @@ import {
   useRef
 } from 'react'
 import type { AssetKind } from '@shared/types'
+import {
+  extractVideoFrame,
+  getCachedThumb,
+  loadThumb,
+  saveThumb,
+  wasExtracted
+} from '@/lib/thumbCache'
 
 export interface ChipMeta {
   label: string
@@ -170,11 +177,35 @@ const ChipEditor = forwardRef<ChipEditorHandle, Props>(function ChipEditor(props
     const last = frag.lastChild
     range.insertNode(frag)
     if (last) {
-      range.setStartAfter(last)
-      range.collapse(true)
+      placeCaretAfter(range, last)
       sel.removeAllRanges()
       sel.addRange(range)
     }
+  }
+
+  /**
+   * Anchor the caret so the next keystroke lands inside a Text node — putting
+   * it at an element boundary breaks detectMention's `nodeType === TEXT_NODE`
+   * guard, which would silently drop the next @-trigger.
+   */
+  const placeCaretAfter = (range: Range, last: Node) => {
+    if (last.nodeType === Node.TEXT_NODE) {
+      const t = last as Text
+      range.setStart(t, t.length)
+    } else {
+      // Insert a zero-width-but-real text node right after the chip so caret
+      // has somewhere to live; we already have one after every chip insert
+      // path, but be defensive.
+      const next = last.nextSibling
+      if (next && next.nodeType === Node.TEXT_NODE) {
+        range.setStart(next, 0)
+      } else {
+        const t = document.createTextNode(' ')
+        last.parentNode?.insertBefore(t, last.nextSibling)
+        range.setStart(t, t.length)
+      }
+    }
+    range.collapse(true)
   }
 
   const insertText = (text: string) => {
@@ -219,12 +250,16 @@ const ChipEditor = forwardRef<ChipEditorHandle, Props>(function ChipEditor(props
     r.deleteContents()
     const el = makeChipElement(chip)
     const space = document.createTextNode(' ')
+    // Range.insertNode prepends to the range start, so insert space first to
+    // end up with [el][space] (insert el last → ends adjacent to range start).
     r.insertNode(space)
     r.insertNode(el)
     const sel = window.getSelection()
     if (sel) {
       const after = document.createRange()
-      after.setStartAfter(space)
+      // Caret must live inside the space text node, not at the element-level
+      // boundary after it — otherwise detectMention rejects the next @ trigger.
+      after.setStart(space, space.length)
       after.collapse(true)
       sel.removeAllRanges()
       sel.addRange(after)
@@ -303,17 +338,15 @@ export default ChipEditor
 
 // ---------------- helpers ----------------
 
-interface Segment {
-  type: 'text' | 'chip'
-  value: string
-  meta?: ChipMeta
-}
+type Segment =
+  | { type: 'text'; value: string }
+  | { type: 'chip'; meta: ChipMeta }
 
 export function parseSegments(
   text: string,
   resolveMention: (label: string) => ChipMeta | null,
   mentionLabels: string[]
-): { type: 'text'; value: string }[] | { type: 'chip'; meta: ChipMeta; value: string }[] {
+): Segment[] {
   const sortedLabels = [...mentionLabels].sort((a, b) => b.length - a.length)
   const out: Segment[] = []
   let buf = ''
@@ -334,7 +367,7 @@ export function parseSegments(
             out.push({ type: 'text', value: buf })
             buf = ''
           }
-          out.push({ type: 'chip', value: matched, meta })
+          out.push({ type: 'chip', meta })
           i += 1 + matched.length
           continue
         }
@@ -344,9 +377,7 @@ export function parseSegments(
     i++
   }
   if (buf) out.push({ type: 'text', value: buf })
-  // The caller does narrowing via discriminated union — return as plain Segment[].
-  // (Loose return type to keep the call-site simple.)
-  return out as never
+  return out
 }
 
 function makeChipElement(meta: ChipMeta): HTMLElement {
@@ -372,23 +403,7 @@ function makeChipElement(meta: ChipMeta): HTMLElement {
     }
     thumb.appendChild(img)
   } else if (meta.src && meta.kind === 'video') {
-    const v = document.createElement('video')
-    v.src = meta.src
-    v.muted = true
-    v.playsInline = true
-    v.preload = 'metadata'
-    v.onloadedmetadata = () => {
-      try {
-        v.currentTime = 0.1
-      } catch {
-        /* ignore */
-      }
-    }
-    v.onerror = () => {
-      v.remove()
-      thumb.appendChild(makeKindGlyph(meta.kind))
-    }
-    thumb.appendChild(v)
+    attachVideoThumb(thumb, meta.src, meta.kind)
   } else {
     thumb.appendChild(makeKindGlyph(meta.kind))
   }
@@ -398,6 +413,56 @@ function makeChipElement(meta: ChipMeta): HTMLElement {
   label.textContent = meta.label
   el.appendChild(label)
   return el
+}
+
+/**
+ * Wire up a video thumbnail with the same caching strategy as <Thumbnail>:
+ * sync hit → <img>, async hit → swap in <img>, miss → render <video>, extract
+ * a frame on seeked, persist + swap.
+ */
+function attachVideoThumb(thumb: HTMLElement, src: string, kind: AssetKind) {
+  const sync = getCachedThumb(src)
+  if (sync) {
+    thumb.appendChild(makeImgFor(sync))
+    return
+  }
+  // Render the live <video> while we await disk cache + extraction.
+  const v = document.createElement('video')
+  v.src = src
+  v.muted = true
+  v.playsInline = true
+  v.preload = 'metadata'
+  v.crossOrigin = 'anonymous'
+  v.onloadedmetadata = () => {
+    try {
+      v.currentTime = 0.1
+    } catch {
+      /* ignore */
+    }
+  }
+  v.onseeked = () => {
+    if (wasExtracted(src)) return
+    const frame = extractVideoFrame(v)
+    if (!frame) return
+    saveThumb(src, frame)
+    thumb.replaceChildren(makeImgFor(frame))
+  }
+  v.onerror = () => {
+    thumb.replaceChildren(makeKindGlyph(kind))
+  }
+  thumb.appendChild(v)
+  // Race the disk cache against extraction; whichever resolves first wins.
+  loadThumb(src).then((d) => {
+    if (d && thumb.contains(v)) thumb.replaceChildren(makeImgFor(d))
+  })
+}
+
+function makeImgFor(src: string): HTMLImageElement {
+  const img = document.createElement('img')
+  img.src = src
+  img.alt = ''
+  img.draggable = false
+  return img
 }
 
 function makeKindGlyph(kind: AssetKind): SVGElement {
@@ -460,11 +525,10 @@ function renderInto(
   mentionLabels: string[]
 ) {
   root.innerHTML = ''
-  const segs = parseSegments(text, resolveMention, mentionLabels) as unknown as Segment[]
-  for (const s of segs) {
-    if (s.type === 'chip' && s.meta) {
+  for (const s of parseSegments(text, resolveMention, mentionLabels)) {
+    if (s.type === 'chip') {
       root.appendChild(makeChipElement(s.meta))
-    } else if (s.type === 'text') {
+    } else {
       const parts = s.value.split('\n')
       parts.forEach((p, idx) => {
         if (p) root.appendChild(document.createTextNode(p))
