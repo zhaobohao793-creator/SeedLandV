@@ -121,7 +121,7 @@ def _publish_snapshot(session: Session, task: Task) -> None:
         select(TaskAsset).where(TaskAsset.task_id == task.id).order_by(TaskAsset.position)
     ).all()
     payload = {
-        "server_id": str(task.uuid),
+        "serverId": str(task.uuid),
         "id": task.ark_task_id,
         "localId": task.local_id,
         "orderId": task.order_id,

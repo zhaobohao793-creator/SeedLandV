@@ -7,11 +7,9 @@ import WebSocket from 'ws'
 import type { Auth } from './auth'
 import type { TaskRecord } from '@shared/types'
 
-type TaskUpdate = TaskRecord & { server_id?: string }
-
 interface Envelope {
   type: 'task:update'
-  data: TaskUpdate
+  data: TaskRecord
 }
 
 const BACKOFF_MIN_MS = 1_000
@@ -26,7 +24,7 @@ export class TaskSocket {
   constructor(
     private baseHttpUrl: string,
     private auth: Auth,
-    private onTask: (t: TaskUpdate) => void
+    private onTask: (t: TaskRecord) => void
   ) {}
 
   setBaseUrl(url: string): void {
