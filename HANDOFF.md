@@ -20,6 +20,7 @@
 | Phase 6 — 重试 + 限流 + 健康检查 + Sentry | ✅ 68/68 单测 + 端到端 smoke | 见 §7 |
 | Phase 6b — TOS presigned PUT 直传 + CORS | ⏳ 待开 | 200MB 视频 server 中转吃 RSS |
 | Phase 7 — Prometheus + Helm + VKE | ⏳ | 上线后才有意义 |
+| Phase 8 — 重启即清空契约 + 管理员订单查询 | ✅ 73/73 单测 | 见 §11 |
 
 ---
 
@@ -361,3 +362,43 @@ docker compose -f docker-compose.dev.yml down
 ## 10. 下一会话开场白模板
 
 > 继续 SeedLandV。Phase 0-6 已完成,重试 + 限流 + Sentry + /readyz 端到端 smoke 通过,代码全 commit 在 `init` 分支。先读 `/Applications/SeedLandV/SeedLandV/HANDOFF.md` 拿状态,按 §2 起服务(uvicorn 没 --reload,celery 加 -B 启 beat —— 改 server 代码必须 pkill + 重启),跑 §4 验证一下没坏(`curl /readyz` 三 dep ok),然后开 Phase 6b(TOS presigned PUT 直传 + CORS)或 Phase 7(Prometheus + Helm/VKE)。
+
+---
+
+## 11. Phase 8 实装一览 — 重启即清空 + 管理员订单查询(已 commit)
+
+**动机**:之前 Celery `task_acks_late=True` + Redis broker 持久化 → 重启后旧任务可能被重新派发,且 Postgres 里 `submitting`/`queued`/`running`/`mirroring` 状态行只靠 `mirror_retry_sweep` 每小时兜底,中间窗口前端看到卡死的中间态。改为"重启即清空"语义:本地状态成为可信源,Ark 侧浪费一两个任务可接受。
+
+### Server side
+- `app/lifecycle/startup_cleanup.py` — 新模块。两个职责函数 + 一个 orchestrator:
+  - `purge_in_flight_tasks(session)`:`UPDATE tasks SET status=failed, terminal_at=now()` where 非终态 + 每行写一条 `task_events(kind='server_restart')` 审计
+  - `flush_celery_queues(redis)`:`DEL celery / unacked / unacked_index` + SCAN+DEL `celery-task-meta-*` / `_kombu.binding.*`
+  - `run_startup_cleanup()`:FastAPI lifespan 钩子调用,失败一边不影响另一边
+- `app/main.py` — lifespan 改为 `await run_startup_cleanup()` then yield
+- `app/routes/admin_orders.py` — 新路由 `GET /v1/admin/orders`,join `tasks ⋈ users` 带出工号 + 显示名,支持 `employee_id`/`order_id`/`status`/`from`/`to`/`limit`/`offset` 过滤,`get_current_admin` 鉴权
+- `app/schemas/tasks.py` — 新增 `AdminOrderOut(TaskOut)` 加 `employeeId` + `employeeDisplayName`
+
+### 持久层职责(确认)
+- **PostgreSQL** = 订单/工号/状态查询索引(无 schema 变更,Phase 7 加的 `ix_tasks_tenant_order_id` 索引够用)
+- **TOS** = 资产源(videos / last_frames / uploads),签名 URL 实时按需生成 + `signed_url_refresh` 续签
+- **Redis** = 仅瞬态:Celery 队列(每次重启清)、pub/sub(transient)、asset_token TTL、限流 TTL
+
+### 不动的东西(故意保留)
+- `mirror_retry_sweep` 留作兜底,不删 —— 启动清理覆盖大头,sweep 防 worker 单独崩
+- `signed_url_refresh` 不动
+- `asset_token` / 限流计数 不在清理范围,让 TTL 自然过期
+- 没接 Celery `worker_ready` 信号 —— 防"只重启 worker 时把 API 刚提交的行误杀"竞态
+
+### 已知约束
+- 单工作室单机部署假设(api+worker 同生共死)。多副本要换"分布式锁 + leader-only 清理"或 graceful drain
+- 在飞 Ark 任务被本地标 failed 后,Ark 侧仍跑完,算力浪费在所难免;后续可加 best-effort `ark_cancel`
+
+### 端到端验证(手工)
+1. 起 api + worker
+2. 提交一个任务进 `running` / `mirroring`
+3. `pkill -f uvicorn && pkill -f celery && sleep 2`
+4. 重启 api + worker(uvicorn 启动日志会有 `startup_cleanup: tasks_failed=N redis_keys_deleted=M`)
+5. `curl /v1/tasks` 该行已变 `failed`,`terminal_at` 有值
+6. `redis-cli LLEN celery` 应该是 0
+7. TOS 控制台 video.mp4 仍存在(资产不动)
+8. `curl -H "Authorization: Bearer <admin_token>" '/v1/admin/orders?employee_id=E001'` 返回该工号订单

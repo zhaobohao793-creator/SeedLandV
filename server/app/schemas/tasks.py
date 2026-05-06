@@ -101,3 +101,10 @@ class SubmitTaskResponse(BaseModel):
     orderId: str
     orderSeq: int
     status: TaskStatus
+
+
+class AdminOrderOut(TaskOut):
+    """管理员视图:在 TaskOut 之上 join `users` 表带出工号 / 显示名。"""
+
+    employeeId: str | None = None
+    employeeDisplayName: str | None = None

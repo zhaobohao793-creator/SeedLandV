@@ -6,6 +6,8 @@ import type {
   AssetSource,
   CreateEmployeeInput,
   EmployeeRecord,
+  ListOrdersFilters,
+  OrderRecord,
   SubmitTaskInput,
   TaskRecord,
   TaskStatus,
@@ -145,6 +147,28 @@ export class ApiClient {
       })
     )
     return { localId, orderId: res.orderId, orderSeq: res.orderSeq }
+  }
+
+  async listOrders(filters: ListOrdersFilters = {}): Promise<OrderRecord[]> {
+    const qs = new URLSearchParams()
+    if (filters.employeeId) qs.set('employee_id', filters.employeeId)
+    if (filters.orderId) qs.set('order_id', filters.orderId)
+    if (filters.status) qs.set('status', filters.status)
+    if (filters.from) qs.set('from', filters.from)
+    if (filters.to) qs.set('to', filters.to)
+    if (filters.limit !== undefined) qs.set('limit', String(filters.limit))
+    if (filters.offset !== undefined) qs.set('offset', String(filters.offset))
+    const path = qs.toString() ? `/v1/admin/orders?${qs}` : '/v1/admin/orders'
+    type ServerOrderOut = ServerTaskOut & {
+      employeeId: string | null
+      employeeDisplayName: string | null
+    }
+    const out = await this.withRefresh(() => this.http.get<ServerOrderOut[]>(path))
+    return out.map((o) => ({
+      ...fromServer(o),
+      employeeId: o.employeeId,
+      employeeDisplayName: o.employeeDisplayName
+    }))
   }
 
   async listEmployees(): Promise<EmployeeRecord[]> {

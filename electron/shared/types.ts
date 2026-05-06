@@ -104,6 +104,7 @@ export interface SubmitTaskInput {
 }
 
 export type TaskStatus =
+  | 'pending'
   | 'submitting'
   | 'queued'
   | 'running'
@@ -175,6 +176,21 @@ export interface BootstrapStatus {
   initialized: boolean
 }
 
+export interface OrderRecord extends TaskRecord {
+  employeeId: string | null
+  employeeDisplayName: string | null
+}
+
+export interface ListOrdersFilters {
+  employeeId?: string
+  orderId?: string
+  status?: TaskStatus
+  from?: string
+  to?: string
+  limit?: number
+  offset?: number
+}
+
 declare global {
   interface Window {
     seedland: {
@@ -204,6 +220,10 @@ declare global {
       deactivateEmployee: (
         userId: string
       ) => Promise<EmployeeRecord | { error: string }>
+      // Admin: tenant-wide order history (admin-only on the server side)
+      listOrders: (
+        filters?: ListOrdersFilters
+      ) => Promise<OrderRecord[] | { error: string }>
       // Tenant Ark Key
       setArkKey: (key: string) => Promise<{ ok: true } | { error: string }>
       getArkKeyStatus: () => Promise<{ hasKey: boolean }>

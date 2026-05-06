@@ -7,6 +7,7 @@ import type {
   ApiStatus,
   AssetKind,
   CreateEmployeeInput,
+  ListOrdersFilters,
   SubmitTaskInput,
   UpdateEmployeeInput
 } from '@shared/types'
@@ -203,6 +204,14 @@ function registerIpc() {
   ipcMain.handle('admin:deactivateEmployee', async (_e, userId: string) => {
     try {
       return await api.deactivateEmployee(userId)
+    } catch (err) {
+      return { error: (err as Error).message }
+    }
+  })
+
+  ipcMain.handle('admin:listOrders', async (_e, filters?: ListOrdersFilters) => {
+    try {
+      return await api.listOrders(filters ?? {})
     } catch (err) {
       return { error: (err as Error).message }
     }

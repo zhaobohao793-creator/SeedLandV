@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Check, ChevronDown, LogOut, Sparkles, Users, Zap } from 'lucide-react'
+import { Check, ChevronDown, History, LogOut, Sparkles, Users, Zap } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
 import type { ModelId } from '@shared/types'
 import { MODELS, metaOf } from '@shared/types'
 import { cn } from '@/lib/cn'
 import EmployeeManagement from '@/components/admin/EmployeeManagement'
+import OrderHistory from '@/components/admin/OrderHistory'
 
 const MODEL_ICONS: Record<ModelId, typeof Sparkles> = {
   'doubao-seedance-2-0-260128': Sparkles,
@@ -21,6 +22,7 @@ export default function Topbar() {
   const setAuthState = useAppStore((s) => s.setAuthState)
   const [open, setOpen] = useState(false)
   const [adminOpen, setAdminOpen] = useState(false)
+  const [ordersOpen, setOrdersOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
 
   const onLogout = async () => {
@@ -145,15 +147,26 @@ export default function Topbar() {
 
       <div className="flex items-center gap-3">
         {authState.isAdmin && (
-          <button
-            type="button"
-            onClick={() => setAdminOpen(true)}
-            title="员工管理"
-            className="flex items-center gap-1.5 rounded-full border border-[rgba(138,148,184,0.12)] px-3 py-1.5 text-[11px] font-medium tracking-wider uppercase text-text-muted transition-colors hover:border-[rgba(0,229,255,0.3)] hover:bg-[rgba(0,229,255,0.04)]"
-          >
-            <Users className="h-3.5 w-3.5" />
-            员工管理
-          </button>
+          <>
+            <button
+              type="button"
+              onClick={() => setOrdersOpen(true)}
+              title="订单历史"
+              className="flex items-center gap-1.5 rounded-full border border-[rgba(138,148,184,0.12)] px-3 py-1.5 text-[11px] font-medium tracking-wider uppercase text-text-muted transition-colors hover:border-[rgba(0,229,255,0.3)] hover:bg-[rgba(0,229,255,0.04)]"
+            >
+              <History className="h-3.5 w-3.5" />
+              订单历史
+            </button>
+            <button
+              type="button"
+              onClick={() => setAdminOpen(true)}
+              title="员工管理"
+              className="flex items-center gap-1.5 rounded-full border border-[rgba(138,148,184,0.12)] px-3 py-1.5 text-[11px] font-medium tracking-wider uppercase text-text-muted transition-colors hover:border-[rgba(0,229,255,0.3)] hover:bg-[rgba(0,229,255,0.04)]"
+            >
+              <Users className="h-3.5 w-3.5" />
+              员工管理
+            </button>
+          </>
         )}
 
         <button
@@ -193,6 +206,7 @@ export default function Topbar() {
       </div>
 
       {adminOpen && <EmployeeManagement onClose={() => setAdminOpen(false)} />}
+      {ordersOpen && <OrderHistory onClose={() => setOrdersOpen(false)} />}
     </header>
   )
 }

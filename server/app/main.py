@@ -10,6 +10,7 @@ from app.auth.admin_routes import router as admin_router
 from app.auth.routes import router as auth_router
 from app.config import get_settings
 from app.observability.sentry import init_sentry
+from app.routes.admin_orders import router as admin_orders_router
 from app.routes.assets import router as assets_router
 from app.routes.tasks import router as tasks_router
 from app.routes.tenants import router as tenants_router
@@ -20,6 +21,9 @@ init_sentry(get_settings(), integration="fastapi")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from app.lifecycle.startup_cleanup import run_startup_cleanup
+
+    await run_startup_cleanup()
     yield
 
 
@@ -41,6 +45,7 @@ app.add_middleware(
 
 app.include_router(auth_router)
 app.include_router(admin_router)
+app.include_router(admin_orders_router)
 app.include_router(tenants_router)
 app.include_router(assets_router)
 app.include_router(tasks_router)

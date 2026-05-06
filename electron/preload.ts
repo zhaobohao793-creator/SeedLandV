@@ -5,6 +5,8 @@ import type {
   BootstrapStatus,
   CreateEmployeeInput,
   EmployeeRecord,
+  ListOrdersFilters,
+  OrderRecord,
   SubmitTaskInput,
   TaskRecord,
   UpdateEmployeeInput
@@ -50,6 +52,10 @@ const api = {
   deactivateEmployee: (userId: string) =>
     ipcRenderer.invoke('admin:deactivateEmployee', userId) as Promise<
       EmployeeRecord | { error: string }
+    >,
+  listOrders: (filters?: ListOrdersFilters) =>
+    ipcRenderer.invoke('admin:listOrders', filters) as Promise<
+      OrderRecord[] | { error: string }
     >,
 
   // Tenant Ark Key
