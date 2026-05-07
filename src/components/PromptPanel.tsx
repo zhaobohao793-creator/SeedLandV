@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { AtSign, Library } from 'lucide-react'
-import type { AssetKind, AssetSource, GenerationMode, LibraryItem } from '@shared/types'
+import { AtSign } from 'lucide-react'
+import type { AssetKind, GenerationMode } from '@shared/types'
 import { useAppStore } from '@/lib/store'
 import { cn } from '@/lib/cn'
 import {
@@ -9,7 +9,7 @@ import {
   labelForAsset,
   registerPromptInserter
 } from '@/lib/assetRefs'
-import { assetSrc, librarySrc } from '@/lib/assetUrl'
+import { assetSrc } from '@/lib/assetUrl'
 import Thumbnail from './asset/Thumbnail'
 import ChipEditor, {
   type ChipEditorHandle,
@@ -31,16 +31,12 @@ interface MentionItem {
   hint: string
   kind: AssetKind
   src?: string
-  fromLibrary: boolean
-  source?: AssetSource
 }
 
 export default function PromptPanel({ mode, placeholder, minRows = 4, orderedLabels }: Props) {
   const prompt = useAppStore((s) => s.forms[mode].prompt)
   const setPrompt = useAppStore((s) => s.setPrompt)
   const assets = useAppStore((s) => s.forms[mode].assets)
-  const addAsset = useAppStore((s) => s.addAsset)
-  const library = useAppStore((s) => s.library)
 
   const editorRef = useRef<ChipEditorHandle>(null)
   const [mention, setMention] = useState<MentionState | null>(null)
@@ -49,7 +45,11 @@ export default function PromptPanel({ mode, placeholder, minRows = 4, orderedLab
   const allowed = allowedKindsOf(mode)
   const supportsAssets = allowed.length > 0
 
-  /** Build the canonical chip meta for a label by reading current store state. */
+  /**
+   * Resolve a label to chip meta. Only the current form's uploaded assets
+   * are considered — library items are reachable through the AssetPicker's
+   * library tab, not via @-mention.
+   */
   const resolveMention = (label: string): ChipMeta | null => {
     const st = useAppStore.getState()
     const formAssets = st.forms[mode].assets
@@ -60,19 +60,13 @@ export default function PromptPanel({ mode, placeholder, minRows = 4, orderedLab
         return { label, kind: a.kind, src: assetSrc(a) }
       }
     }
-    const lib = st.library.find((x) => x.name === label && allowed.includes(x.kind))
-    if (lib) return { label, kind: lib.kind, src: librarySrc(lib) }
     return null
   }
 
-  const mentionLabels = useMemo(() => {
-    const labels: string[] = []
-    assets.forEach((_, i) => labels.push(labelForAsset(assets, i, orderedLabels)))
-    library.forEach((x) => {
-      if (allowed.includes(x.kind)) labels.push(x.name)
-    })
-    return labels
-  }, [assets, library, allowed, orderedLabels])
+  const mentionLabels = useMemo(
+    () => assets.map((_, i) => labelForAsset(assets, i, orderedLabels)),
+    [assets, orderedLabels]
+  )
 
   // Register the imperative inserter so AssetPicker / library can drive us.
   useEffect(() => {
@@ -88,30 +82,17 @@ export default function PromptPanel({ mode, placeholder, minRows = 4, orderedLab
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode])
 
-  // Build popover options from current form assets + library.
+  // Popover only lists the current form's uploaded assets.
   const items: MentionItem[] = useMemo(() => {
     if (!supportsAssets) return []
-    const fromForm: MentionItem[] = assets.map((a, i) => ({
+    return assets.map((a, i) => ({
       key: `form-${i}`,
       label: labelForAsset(assets, i, orderedLabels),
       hint: a.mode === 'url' ? a.url : a.name,
       kind: a.kind,
-      src: assetSrc(a),
-      fromLibrary: false
+      src: assetSrc(a)
     }))
-    const fromLib: MentionItem[] = library
-      .filter((x) => allowed.includes(x.kind))
-      .map((x) => ({
-        key: `lib-${x.id}`,
-        label: x.name,
-        hint: x.mode === 'url' ? x.url : '资产库',
-        kind: x.kind,
-        src: librarySrc(x),
-        fromLibrary: true,
-        source: libraryToSource(x)
-      }))
-    return [...fromForm, ...fromLib]
-  }, [assets, library, allowed, supportsAssets, orderedLabels])
+  }, [assets, supportsAssets, orderedLabels])
 
   const filtered = useMemo(() => {
     if (!mention) return items
@@ -127,9 +108,6 @@ export default function PromptPanel({ mode, placeholder, minRows = 4, orderedLab
   }, [filtered.length])
 
   const commit = (item: MentionItem) => {
-    if (item.fromLibrary && item.source) {
-      addAsset(mode, item.source)
-    }
     editorRef.current?.commitMention({ label: item.label, kind: item.kind, src: item.src })
     editorRef.current?.focus()
   }
@@ -191,7 +169,7 @@ export default function PromptPanel({ mode, placeholder, minRows = 4, orderedLab
         <div className="mt-2 flex items-center gap-1 text-[11px] text-text-dim">
           <AtSign className="h-3 w-3" />
           输入 <kbd className="rounded bg-[rgba(7,11,20,0.6)] px-1 font-mono">@</kbd>
-          引用素材或资产库 · 点击下方资产卡片也会插入
+          引用已上传素材 · 点击下方资产卡片也会插入
         </div>
       )}
     </section>
@@ -264,34 +242,13 @@ function MentionPopover({
               rounded="sm"
             />
             <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-1.5">
-                <span className="text-xs font-medium text-text">@{it.label}</span>
-                {it.fromLibrary && <Library className="h-3 w-3 text-text-dim" />}
-              </div>
+              <span className="text-xs font-medium text-text">@{it.label}</span>
               <div className="truncate text-[10px] font-mono text-text-dim">{it.hint}</div>
             </div>
-            {it.fromLibrary && (
-              <span className="shrink-0 rounded bg-[rgba(0,229,255,0.08)] px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide text-neon-cyan">
-                库
-              </span>
-            )}
           </button>
         )
       })}
     </div>,
     document.body
   )
-}
-
-function libraryToSource(item: LibraryItem): AssetSource {
-  if (item.mode === 'local') {
-    return {
-      kind: item.kind,
-      mode: 'local',
-      path: item.path,
-      name: item.name,
-      sizeBytes: item.sizeBytes
-    }
-  }
-  return { kind: item.kind, mode: 'url', url: item.url }
 }
