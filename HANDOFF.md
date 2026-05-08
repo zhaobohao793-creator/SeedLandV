@@ -398,7 +398,17 @@ docker compose -f docker-compose.dev.yml down
 2. 提交一个任务进 `running` / `mirroring`
 3. `pkill -f uvicorn && pkill -f celery && sleep 2`
 4. 重启 api + worker(uvicorn 启动日志会有 `startup_cleanup: tasks_failed=N redis_keys_deleted=M`)
-5. `curl /v1/tasks` 该行已变 `failed`,`terminal_at` 有值
+5. `curl /v1/tasks` 重启后**列表为空**(见下方 boot_at 会话作用域),老行在 DB 里仍是 `failed` + `terminal_at` 有值
 6. `redis-cli LLEN celery` 应该是 0
 7. TOS 控制台 video.mp4 仍存在(资产不动)
-8. `curl -H "Authorization: Bearer <admin_token>" '/v1/admin/orders?employee_id=E001'` 返回该工号订单
+8. `curl -H "Authorization: Bearer <admin_token>" '/v1/admin/orders?employee_id=E001'` 返回该工号订单(走历史接口,不受 boot_at 过滤)
+
+### Phase 8 后续 — 队列面板的会话作用域(已 commit)
+
+**问题**:Phase 8 的清空把非终态打 failed,但 `GET /v1/tasks` 仍返回 tenant 维度过去 100 条(含历史 `completed`/`failed`),所以渲染端重启后队列面板看着像没清。
+
+**修法**:
+- `app/main.py` lifespan 在 cleanup 之后写 `app.state.boot_at = datetime.now(UTC)`
+- `app/routes/tasks.py` `list_tasks` 注入 `Request`,过滤 `Task.created_at >= request.app.state.boot_at`(`boot_at` 缺失时降级为只按 tenant 过滤,保护测试夹具)
+- 历史完整列表走 `/v1/admin/orders`(OrderHistory 模态),不受 boot_at 影响
+- `tests/test_tasks_session_scope.py` 4 个单测:有 boot_at 时 WHERE 含 `created_at >=`、缺 boot_at 时 WHERE 不含 `created_at`、确认是 `>=` 而非 `>` 不会丢同微秒任务

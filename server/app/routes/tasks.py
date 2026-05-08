@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -188,14 +188,22 @@ async def submit_task(
 
 @router.get("", response_model=list[TaskOut])
 async def list_tasks(
+    request: Request,
     session: AsyncSession = Depends(get_session),
     user: User = Depends(get_current_user),
     limit: int = 100,
 ) -> list[TaskOut]:
+    # Live queue is per-session: only tasks created since this API boot. Older
+    # rows persist in Postgres for /v1/admin/orders (history view) but stay out
+    # of the queue panel so restart visibly clears it.
+    boot_at = getattr(request.app.state, "boot_at", None)
+    where = [Task.tenant_id == user.tenant_id]
+    if boot_at is not None:
+        where.append(Task.created_at >= boot_at)
     rows = (
         await session.scalars(
             select(Task)
-            .where(Task.tenant_id == user.tenant_id)
+            .where(*where)
             .order_by(desc(Task.created_at))
             .limit(limit)
         )

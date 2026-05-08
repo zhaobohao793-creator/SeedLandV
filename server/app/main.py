@@ -21,9 +21,16 @@ init_sentry(get_settings(), integration="fastapi")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from datetime import UTC, datetime
+
     from app.lifecycle.startup_cleanup import run_startup_cleanup
 
     await run_startup_cleanup()
+    # Boot timestamp: queue endpoint filters tasks to "this session only" so the
+    # queue panel reads as cleared after restart. Pre-boot rows were already
+    # batch-failed by run_startup_cleanup; this just keeps them out of the live
+    # view. Full history is served by /v1/admin/orders.
+    app.state.boot_at = datetime.now(UTC)
     yield
 
 
