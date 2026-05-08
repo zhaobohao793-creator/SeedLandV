@@ -133,12 +133,9 @@ const ChipEditor = forwardRef<ChipEditorHandle, Props>(function ChipEditor(props
       onMentionStateChange(null)
       return
     }
-    const prev = i > 0 ? text[i - 1] : ''
-    if (prev && /[\w一-鿿]/.test(prev)) {
-      mentionAnchor.current = null
-      onMentionStateChange(null)
-      return
-    }
+    // No word-boundary guard before "@": this is a prompt input, not an
+    // email field. Requiring whitespace before "@" silently broke the
+    // second @-trigger after CJK text (e.g. "继续@" — prev char is CJK).
     const query = text.slice(i + 1, offset)
     mentionAnchor.current = { node, start: i, end: offset }
     // Caret rect: collapse a temporary range at the caret position to read its rect.
