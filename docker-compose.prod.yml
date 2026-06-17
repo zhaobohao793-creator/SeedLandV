@@ -1,0 +1,132 @@
+# SeedLandV — 生产部署 compose（完整后端：迁移 + API + worker + beat + Postgres + Redis）
+#
+#   cp .env.docker.example .env.docker      # 填好密钥
+#   docker compose -f docker-compose.prod.yml --env-file .env.docker up -d --build
+#
+# 只对外暴露 API（默认 8000）；Postgres / Redis 仅在 compose 内网可达。
+name: seedlandv
+
+# 所有应用容器共用的环境。DATABASE_URL / REDIS_URL 指向 compose 服务名（postgres / redis），
+# 不是 localhost——这是和 docker-compose.dev.yml / 本机 .env 最大的区别。
+x-app-env: &app-env
+  DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-seedlandv}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.docker}@postgres:5432/${POSTGRES_DB:-seedlandv}
+  REDIS_URL: redis://redis:6379/0
+  JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env.docker}
+  JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+  JWT_ACCESS_TTL_SECONDS: ${JWT_ACCESS_TTL_SECONDS:-3600}
+  JWT_REFRESH_TTL_SECONDS: ${JWT_REFRESH_TTL_SECONDS:-604800}
+  ARK_KEY_FERNET_SECRET: ${ARK_KEY_FERNET_SECRET:?set ARK_KEY_FERNET_SECRET in .env.docker}
+  ARK_BASE_URL: ${ARK_BASE_URL:-https://ark.cn-beijing.volces.com/api/v3}
+  ARK_SUBMIT_RATE_LIMIT_PER_HOUR: ${ARK_SUBMIT_RATE_LIMIT_PER_HOUR:-100}
+  VOLC_TOS_AK: ${VOLC_TOS_AK:?set VOLC_TOS_AK in .env.docker}
+  VOLC_TOS_SK: ${VOLC_TOS_SK:?set VOLC_TOS_SK in .env.docker}
+  VOLC_TOS_BUCKET: ${VOLC_TOS_BUCKET:?set VOLC_TOS_BUCKET in .env.docker}
+  VOLC_TOS_REGION: ${VOLC_TOS_REGION:-cn-beijing}
+  VOLC_TOS_ENDPOINT: ${VOLC_TOS_ENDPOINT:-tos-cn-beijing.volces.com}
+  SENTRY_DSN: ${SENTRY_DSN:-}
+  SENTRY_ENV: ${SENTRY_ENV:-production}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-seedlandv}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.docker}
+      POSTGRES_DB: ${POSTGRES_DB:-seedlandv}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-seedlandv} -d ${POSTGRES_DB:-seedlandv}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # 一次性迁移：先于 api / worker 把 schema 升到最新，跑完即退出。
+  # alembic upgrade head 幂等，重复 up 无副作用。
+  migrate:
+    build:
+      context: ./server
+      dockerfile: Dockerfile.api
+    image: seedlandv-api
+    restart: "no"
+    environment: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["alembic", "upgrade", "head"]
+
+  api:
+    build:
+      context: ./server
+      dockerfile: Dockerfile.api
+    image: seedlandv-api
+    restart: unless-stopped
+    environment: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "${API_PORT:-8000}:8000"
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz', timeout=3)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  worker:
+    build:
+      context: ./server
+      dockerfile: Dockerfile.worker
+    image: seedlandv-worker
+    restart: unless-stopped
+    environment: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  # Celery beat：定时任务（TOS 镜像补偿、签名 URL 续期）。只允许 1 个实例。
+  beat:
+    build:
+      context: ./server
+      dockerfile: Dockerfile.worker
+    image: seedlandv-worker
+    restart: unless-stopped
+    environment: *app-env
+    depends_on:
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    command:
+      - celery
+      - -A
+      - app.workers.celery_app:celery_app
+      - beat
+      - --loglevel=info
+
+volumes:
+  pgdata:
+  redisdata:
